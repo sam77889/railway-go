@@ -134,8 +134,9 @@ git push -u origin main
 * `NAME`：自定义节点名称前缀。
 
 > **可选：CF 优选 IP**
-> 配置 `CF_IP` 变量即可（如 `CF_IP=104.16.0.1`）。
-> 设置后，节点连接地址使用此优选 IP，SNI/Host 仍维持 Argo 域名。
+> 配置 `CF_IP` 变量即可（如 `CF_IP=104.16.0.1`，支持逗号分隔多个：`CF_IP=104.16.0.1,108.162.196.94`）。
+> 设置后，每个优选 IP 各生成一个节点（Argo-Fixed-1、Argo-Fixed-2 ...），连接地址使用优选 IP，SNI/Host 仍维持 Argo 域名，配合 Auto-Fallback 自动选优。
+> 未手动设置 `CF_IP` 时，启动脚本会自动从仓库根目录的 `result.csv`（CloudflareSpeedTest 测速结果）中提取丢包率为 0 且测速有效的前 5 个低延迟 IP——更新优选 IP 只需替换该文件并推送。
 
 ### 4.4 获取 Argo 固定隧道 Token（针对模式二）
 
@@ -202,7 +203,7 @@ https://<Argo域名>/<你的UUID>/clash
 | `ARGO_TOKEN` | 否（双隧道必填）| 空 | Cloudflare Zero Trust 隧道 Token |
 | `ARGO_DOMAIN` | 否（双隧道必填）| 空 | 固定隧道自定义域名 |
 | `NAME` | 否 | `argo` | 节点名称前缀 |
-| `CF_IP` | 否 | 空 | Cloudflare 优选 IP（设置后作为节点 connection host） |
+| `CF_IP` | 否 | 自动读 `result.csv` | Cloudflare 优选 IP，逗号分隔多个（每 IP 一个节点）。未设置时自动从仓库 `result.csv` 提取前 5 个低延迟 IP |
 | `PORT` | ❌ 不要手动设 | `8080` (Railway 注入)| 内部服务监听端口 |
 
 ---

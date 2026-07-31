@@ -34,7 +34,19 @@ fi
 
 ARGO_DOMAIN="$CLEAN_DOMAIN"
 ARGO_TOKEN="$CLEAN_TOKEN"
+
+# 优选 IP 解析：环境变量 CF_IP 优先；未设置时自动从仓库 result.csv 提取延迟最低的 5 个
 CF_IP=${CF_IP:-}
+if [ -z "$CF_IP" ]; then
+    SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+    if [ -f "$SCRIPT_DIR/result.csv" ]; then
+        CF_IP=$(awk -F, 'NR>1 && ($4+0)==0 && ($6+0)>0 {print ($5+0), $1}' "$SCRIPT_DIR/result.csv" | sort -n | head -n 5 | awk '{ips = ips (ips ? "," : "") $2} END {print ips}')
+        CF_IP_FROM="result.csv"
+    fi
+else
+    CF_IP_FROM="环境变量"
+fi
+export CF_IP
 
 echo ""
 echo "╔══════════════════════════════════════════════╗"
@@ -44,6 +56,9 @@ echo ""
 echo "  UUID:     ${UUID}"
 echo "  端口:     ${PORT}"
 echo "  节点名:   ${NODE_NAME}"
+if [ -n "$CF_IP" ]; then
+    echo "  优选 IP:  ${CF_IP}（来源: ${CF_IP_FROM}）"
+fi
 echo ""
 
 # ── 1. 启动 Node.js VLESS-WS 服务 ──
@@ -138,23 +153,41 @@ echo "║   ✅ 部署成功                                ║"
 echo "╚══════════════════════════════════════════════╝"
 echo ""
 
+# 输出节点链接：$1=隧道域名 $2=标签(fixed/tmp)，CF_IP 为逗号分隔多值时每个 IP 输出一条
+print_links() {
+    PL_DOMAIN="$1"
+    PL_TAG="$2"
+    if [ -n "$CF_IP" ]; then
+        PL_COUNT=$(echo "$CF_IP" | tr ',' '\n' | grep -c .)
+        PL_IDX=0
+        echo "$CF_IP" | tr ',' '\n' | while read -r PL_IP; do
+            PL_IP=$(echo "$PL_IP" | tr -d ' ')
+            [ -z "$PL_IP" ] && continue
+            PL_IDX=$((PL_IDX + 1))
+            if [ "$PL_COUNT" -gt 1 ]; then
+                echo "  链接: vless://${UUID}@${PL_IP}:443?encryption=none&security=tls&sni=${PL_DOMAIN}&fp=chrome&type=ws&host=${PL_DOMAIN}&path=%2F#Vl-${PL_TAG}-${PL_IDX}-${NODE_NAME}"
+            else
+                echo "  链接: vless://${UUID}@${PL_IP}:443?encryption=none&security=tls&sni=${PL_DOMAIN}&fp=chrome&type=ws&host=${PL_DOMAIN}&path=%2F#Vl-${PL_TAG}-${NODE_NAME}"
+            fi
+        done
+    else
+        echo "  链接: vless://${UUID}@${PL_DOMAIN}:443?encryption=none&security=tls&sni=${PL_DOMAIN}&fp=chrome&type=ws&host=${PL_DOMAIN}&path=%2F#Vl-${PL_TAG}-${NODE_NAME}"
+    fi
+}
+
 # 固定隧道节点
 if [ -n "$ARGO_DOMAIN" ] && [ -n "$CF_FIXED_PID" ]; then
-    FIXED_ADDR=${CF_IP:-$ARGO_DOMAIN}
-    FIXED_LINK="vless://${UUID}@${FIXED_ADDR}:443?encryption=none&security=tls&sni=${ARGO_DOMAIN}&fp=chrome&type=ws&host=${ARGO_DOMAIN}&path=%2F#Vl-fixed-${NODE_NAME}"
     echo "  ── 固定隧道 ──"
     echo "  域名: ${ARGO_DOMAIN}"
-    echo "  链接: ${FIXED_LINK}"
+    print_links "$ARGO_DOMAIN" "fixed"
     echo ""
 fi
 
 # 临时隧道节点
 if [ -n "$TMP_DOMAIN" ]; then
-    TMP_ADDR=${CF_IP:-$TMP_DOMAIN}
-    TMP_LINK="vless://${UUID}@${TMP_ADDR}:443?encryption=none&security=tls&sni=${TMP_DOMAIN}&fp=chrome&type=ws&host=${TMP_DOMAIN}&path=%2F#Vl-tmp-${NODE_NAME}"
     echo "  ── 临时隧道 ──"
     echo "  域名: ${TMP_DOMAIN}"
-    echo "  链接: ${TMP_LINK}"
+    print_links "$TMP_DOMAIN" "tmp"
     echo ""
 fi
 

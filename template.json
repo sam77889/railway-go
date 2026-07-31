@@ -17,7 +17,7 @@
       "defaultValue": "argo"
     },
     "CF_IP": {
-      "description": "【可选】Cloudflare 优选 IP。设置后将作为客户端连接的地址 (SNI 仍维持 Argo 域名)。",
+      "description": "【可选】Cloudflare 优选 IP，逗号分隔多个（每个 IP 生成一个节点，配合 Auto-Fallback 自动选优）。不填则自动从仓库 result.csv 提取延迟最低的前 5 个 IP (SNI 仍维持 Argo 域名)。",
       "defaultValue": ""
     }
   }

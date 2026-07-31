@@ -159,7 +159,7 @@ git push -u origin main
 | Variable Name | Value | 说明 |
 |---|---|---|
 | `NAME` | `my-node` | 节点名称前缀，不填默认 `argo` |
-| `CF_IP` | `104.16.0.1` | Cloudflare 优选 IP，不填则使用隧道域名 |
+| `CF_IP` | `108.162.196.94,104.24.146.138` | Cloudflare 优选 IP，逗号分隔多个（每 IP 一个节点）。不填则自动从仓库 `result.csv` 提取前 5 个低延迟 IP |
 
 ### 5.3 填写容错说明
 
@@ -402,14 +402,32 @@ https://<你的ARGO域名>/<你的UUID>/clash
 
 ---
 
-### Q2：固定隧道启动失败，日志显示 "[!] 固定隧道启动失败"
+### Q2：固定隧道启动失败，日志显示 "[✗] 固定隧道启动失败"
 
-**原因**：`ARGO_TOKEN` 无效或已过期。
+**原因**：`ARGO_TOKEN` 无效、已失效，或复制不完整。
 
-**解决**：
-1. 回到 Cloudflare Zero Trust → **Tunnels** → 确认你的隧道状态是否正常。
-2. 如果隧道已被删除，重新创建一个并更新 Token。
-3. 确认 `ARGO_TOKEN` 变量值是以 `eyJh` 开头的完整字符串。
+启动脚本会把 cloudflared 的**错误详情直接打印在失败提示下方的虚线框内**，对号入座：
+
+| 日志中的报错 | 含义与解决 |
+|---|---|
+| `invalid character` / `Couldn't parse token` / `token is malformed` | Token 复制不完整或被截断。重新完整复制 `eyJh` 开头的整串字符（很长，注意别漏结尾） |
+| `unauthorized` / `401` / `403` / `not found` | Token 已失效。隧道被删除或重建过，回 Cloudflare 重新创建隧道并复制新 Token |
+| `edge discovery` / 连接超时类报错 | 网络瞬时问题，通常重启部署即可恢复 |
+
+**可选：本地验证 Token 是否有效**
+
+在本机安装 cloudflared 后运行：
+
+```bash
+cloudflared tunnel run --token <你的Token>
+```
+
+看到 `Connected` 字样说明 Token 有效（Ctrl+C 退出）；立即报错则说明 Token 本身有问题。
+
+**解决步骤**：
+1. 回到 Cloudflare Zero Trust → **Networks** → **Tunnels** → 确认隧道存在。
+2. 如果隧道已被删除或重建，重新创建隧道，复制新 Token 更新到 Railway 的 `ARGO_TOKEN`。
+3. 确认 `ARGO_TOKEN` 变量值是以 `eyJh` 开头的**完整**字符串。
 
 ---
 
@@ -454,6 +472,49 @@ https://<你的ARGO域名>/<你的UUID>/clash
 
 1. **最佳方案**：配置固定隧道（添加 `ARGO_TOKEN` + `ARGO_DOMAIN`），使用 Clash 订阅的自动回退功能。
 2. **临时方案**：每次重启后重新从日志中获取新域名。
+
+---
+
+### Q7：延迟很高（200ms+）怎么优化？
+
+Argo 方案的流量链路是 `客户端 → Cloudflare 边缘 → CF 骨干 → 隧道入口 → Railway 容器`，延迟由前两段决定。按效果排序：
+
+**1. 确认 Railway 区域为新加坡（最常见原因）**
+
+默认区域是美西，从国内访问绕路严重：
+
+1. 点击 Railway 左上角头像 → **Settings** → **General**。
+2. **Preferred Deployment Region** 选择 **Singapore** → **Update Region**。
+3. 回到项目 → **Deployments** → **⋮** → **Redeploy**，让服务迁移到新区域。
+
+**2. 配置 Cloudflare 优选 IP（优化"客户端 → CF 边缘"段）**
+
+1. 下载 [CloudflareSpeedTest](https://github.com/XIU2/CloudflareSpeedTest)，在本机运行测速。
+   - 不同运营商（电信/联通/移动）的最优 IP 不同，以你本机实测为准。
+2. 测速完成后，把生成的 `result.csv` 放进仓库根目录（与 `Dockerfile` 同级），提交推送：
+   ```bash
+   git add result.csv && git commit -m "update CF IPs" && git push
+   ```
+3. Railway 自动重新部署，启动脚本会从 `result.csv` 提取**丢包率为 0 且测速有效**的前 5 个低延迟 IP，每个 IP 生成一个节点（`Argo-Fixed-1` ~ `Argo-Fixed-5`），配合 Auto-Fallback 自动选优。
+4. 以后优选 IP 劣化时，重新测速 → 替换 `result.csv` → 推送即可，**无需改动 Railway 面板变量**。
+
+> 💡 也可以在 Railway **Variables** 手动设置 `CF_IP`（逗号分隔多个），手动设置的优先级高于 `result.csv`。
+
+**3. 优先使用固定隧道节点**
+
+Clash 代理组选择 `♻️ Auto-Fallback`（默认优先固定隧道），或手动选 `Argo-Fixed`。
+
+**4. 如果以上仍不满足需求**
+
+CF 免费 CDN 的物理绕行决定了 ~150ms 起步。追求极致延迟可改用同目录 [`quick-deploy/`](../quick-deploy/) 直连方案（客户端直连 Railway 新加坡，可低至 60 ~ 120ms），代价是抗封能力弱，适合临时使用。
+
+**延迟参考（国内出发）：**
+
+| 方案 | 典型延迟 |
+|---|---|
+| 直连 Railway 新加坡 | 60 ~ 120ms |
+| Argo 隧道 + 优选 IP | 120 ~ 180ms |
+| Argo 隧道默认路由（美西区域） | 200 ~ 350ms |
 
 ---
 

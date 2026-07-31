@@ -22,7 +22,8 @@ const { createWebSocketStream, Server: WSServer } = require('ws');
 const NAME = process.env.NAME || 'argo';
 const PORT = process.env.PORT || 8080;
 const uuid = process.env.uuid || '79411d85-b0dc-4cd2-b46c-01789a18c650';
-const CF_IP = process.env.CF_IP || '';
+// CF_IP 支持逗号分隔的多个优选 IP（每个 IP 生成一个节点）
+const CF_IPS = (process.env.CF_IP || '').split(',').map(s => s.trim()).filter(Boolean);
 
 // ===== 域名获取 =====
 function getFixedDomain() {
@@ -35,23 +36,25 @@ function getTmpDomain() {
 }
 
 // ===== VLESS 链接生成 =====
-function buildVlessLink(domain, tag) {
-    const addr = CF_IP || domain;
-    return `vless://${uuid}@${addr}:443?encryption=none&security=tls&sni=${domain}&fp=chrome&type=ws&host=${domain}&path=%2F#Vl-${tag}-${NAME}`;
+// addr 为空时使用隧道域名作为连接地址
+function buildVlessLink(domain, tag, addr) {
+    return `vless://${uuid}@${addr || domain}:443?encryption=none&security=tls&sni=${domain}&fp=chrome&type=ws&host=${domain}&path=%2F#Vl-${tag}-${NAME}`;
 }
 
 function getAllVlessLinks() {
     const links = [];
     const fixed = getFixedDomain();
     const tmp = getTmpDomain();
-    if (fixed) links.push(buildVlessLink(fixed, 'fixed'));
-    if (tmp) links.push(buildVlessLink(tmp, 'tmp'));
+    const addrs = CF_IPS.length > 0 ? CF_IPS : [null];
+    const multi = CF_IPS.length > 1;
+    if (fixed) addrs.forEach((a, i) => links.push(buildVlessLink(fixed, multi ? `fixed-${i + 1}` : 'fixed', a)));
+    if (tmp) addrs.forEach((a, i) => links.push(buildVlessLink(tmp, multi ? `tmp-${i + 1}` : 'tmp', a)));
     return links;
 }
 
 // ===== Clash YAML 生成 =====
-function buildClashProxy(name, domain) {
-    const server = CF_IP || domain;
+function buildClashProxy(name, domain, addr) {
+    const server = addr || domain;
     return [
         `  - name: ${name}`,
         `    type: vless`,
@@ -76,13 +79,22 @@ function buildClashYaml() {
     const proxies = [];
     const proxyNames = [];
 
+    const addrs = CF_IPS.length > 0 ? CF_IPS : [null];
+    const multi = CF_IPS.length > 1;
+
     if (fixed) {
-        proxies.push(buildClashProxy('Argo-Fixed', fixed));
-        proxyNames.push('Argo-Fixed');
+        addrs.forEach((a, i) => {
+            const name = multi ? `Argo-Fixed-${i + 1}` : 'Argo-Fixed';
+            proxies.push(buildClashProxy(name, fixed, a));
+            proxyNames.push(name);
+        });
     }
     if (tmp) {
-        proxies.push(buildClashProxy('Argo-Tmp', tmp));
-        proxyNames.push('Argo-Tmp');
+        addrs.forEach((a, i) => {
+            const name = multi ? `Argo-Tmp-${i + 1}` : 'Argo-Tmp';
+            proxies.push(buildClashProxy(name, tmp, a));
+            proxyNames.push(name);
+        });
     }
 
     if (proxyNames.length === 0) return null;
