@@ -16,6 +16,7 @@ const os = require('os');
 const fs = require('fs');
 const http = require('http');
 const net = require('net');
+const dgram = require('dgram');
 const { createWebSocketStream, Server: WSServer } = require('ws');
 
 // ===== 配置 =====
@@ -68,7 +69,7 @@ function buildClashProxy(name, domain, addr) {
         `    uuid: ${uuid}`,
         `    network: ws`,
         `    tls: true`,
-        `    udp: false`,
+        `    udp: true`,
         `    servername: ${domain}`,
         `    client-fingerprint: chrome`,
         `    ws-opts:`,
@@ -307,7 +308,9 @@ wss.on('connection', ws => {
         // UUID 校验
         if (!id.every((v, i) => v == parseInt(uuidkey.substr(i * 2, 2), 16))) return;
 
-        let i = msg.slice(17, 18).readUInt8() + 19;
+        const addonLen = msg.slice(17, 18).readUInt8();
+        const cmd = msg.slice(18 + addonLen, 19 + addonLen).readUInt8(); // 1=TCP, 2=UDP
+        let i = 19 + addonLen;
         const port = msg.slice(i, i += 2).readUInt16BE(0);
         const ATYP = msg.slice(i, i += 1).readUInt8();
 
@@ -322,11 +325,153 @@ wss.on('connection', ws => {
                         .map(b => b.readUInt16BE(0).toString(16)).join(':')
                     : ''));
 
+        // VLESS 响应头 [VERSION, 0]：TCP/UDP 通用，客户端都会先消费这 2 字节
         ws.send(new Uint8Array([VERSION, 0]));
-        const duplex = createWebSocketStream(ws);
-        net.connect({ host, port }, function () {
-            this.write(msg.slice(i));
-            duplex.on('error', () => { }).pipe(this).on('error', () => { }).pipe(duplex);
-        }).on('error', () => { });
+
+        if (cmd === 2) {
+            // ===== VLESS UDP relay =====
+            // 线路格式（与 edgetunnel / Xray 一致）：目标地址取自 VLESS 头；
+            // 每个 UDP 数据报帧 = [2 字节大端长度][payload]，可跨 WebSocket message，需流式缓冲。
+            const udp = dgram.createSocket(ATYP === 3 ? 'udp6' : 'udp4');
+            udp.on('error', () => { });
+
+            // 空闲超时：60s 无收发则关闭，避免 UDP socket 泄漏
+            let idle = null;
+            const poke = () => {
+                if (idle) clearTimeout(idle);
+                idle = setTimeout(() => { try { ws.close(); } catch { } }, 60000);
+            };
+
+            // 服务端 -> 客户端：收到的 UDP 报文按 [2 字节长度][payload] 帧回传
+            udp.on('message', buf => {
+                if (ws.readyState !== ws.OPEN) return;
+                const hdr = Buffer.alloc(2);
+                hdr.writeUInt16BE(buf.length, 0);
+                ws.send(Buffer.concat([hdr, buf]));
+            });
+            udp.on('message', poke);
+
+            // 客户端 -> 服务端：从 WS 流中解析 [2 字节长度][payload] 帧，逐个 udp.send 到目标
+            let leftover = msg.slice(i);
+            const processFrames = chunk => {
+                let buf = Buffer.concat([leftover, chunk]);
+                let off = 0;
+                while (buf.length - off >= 2) {
+                    const len = buf.readUInt16BE(off);
+                    if (buf.length - off < 2 + len) break; // 帧不完整，等下一截
+                    try { udp.send(buf.slice(off + 2, off + 2 + len), port, host); } catch { }
+                    poke();
+                    off += 2 + len;
+                }
+                leftover = buf.slice(off);
+            };
+
+            poke();
+            processFrames(Buffer.alloc(0));
+            ws.on('message', data => processFrames(Buffer.from(data)));
+
+            const cleanup = () => {
+                if (idle) clearTimeout(idle);
+                try { udp.close(); } catch { }
+            };
+            ws.on('close', cleanup);
+            ws.on('error', cleanup);
+            udp.on('close', () => { try { ws.close(); } catch { } });
+        } else if (cmd === 3) {
+            // ===== VLESS XUDP-over-Mux（cmd=0x03, v1.mux.cool:666）=====
+            // Mihomo 默认用此模式发 UDP（full-cone NAT）。帧格式见 sing-vmess/xudp.go：
+            //   [2帧长][0][0][frametype][option][network][addr=port+ATYP+addr][globalID?(New)][2数据长][数据]
+            //   frametype: 1=New 2=Keep 3=End | option: bit0=OptionData bit1=OptionError | network: 2=UDP
+            // 每包自带目标地址；服务端按目标地址复用 UDP socket，回向用 Keep 帧封装。
+            const sockets = new Map(); // "host:port" -> dgram socket
+            let idle = null;
+            const poke = () => {
+                if (idle) clearTimeout(idle);
+                idle = setTimeout(() => { try { ws.close(); } catch { } }, 60000);
+            };
+            const closeAll = () => { for (const s of sockets.values()) { try { s.close(); } catch { } } sockets.clear(); };
+
+            // 解析 [port(2)][ATYP(1)][addr]，与 VLESS 地址格式一致（ATYP: 1=IPv4 2=域名 3=IPv6）
+            const parseAddr = (buf, off) => {
+                const port = buf.readUInt16BE(off); off += 2;
+                const atyp = buf.readUInt8(off); off += 1;
+                let host;
+                if (atyp === 1) { host = buf.slice(off, off + 4).join('.'); off += 4; }
+                else if (atyp === 2) { const len = buf.readUInt8(off); off += 1; host = buf.slice(off, off + len).toString(); off += len; }
+                else if (atyp === 3) {
+                    const p = []; for (let k = 0; k < 16; k += 2) p.push(buf.readUInt16BE(off + k).toString(16));
+                    host = p.join(':'); off += 16;
+                } else host = '';
+                return { host, port, atyp, off };
+            };
+
+            // 回向 Keep 帧：[2帧长=5+addrLen][0][0][2 Keep][1 OptionData][2 NetworkUDP][addr][2数据长][数据]
+            const sendKeep = (addrBuf, payload) => {
+                if (ws.readyState !== ws.OPEN) return;
+                const frameLen = 5 + addrBuf.length;
+                const hdr = Buffer.alloc(2 + frameLen + 2);
+                hdr.writeUInt16BE(frameLen, 0);
+                hdr[2] = 0; hdr[3] = 0; hdr[4] = 2; hdr[5] = 1; hdr[6] = 2;
+                addrBuf.copy(hdr, 7);
+                hdr.writeUInt16BE(payload.length, 2 + frameLen);
+                ws.send(Buffer.concat([hdr, payload]));
+            };
+
+            const getSocket = (host, port, atyp, addrBuf) => {
+                const key = host + ':' + port;
+                let s = sockets.get(key);
+                if (s) return s;
+                s = dgram.createSocket(atyp === 3 ? 'udp6' : 'udp4');
+                s.on('error', () => { });
+                s.on('message', buf => { sendKeep(addrBuf, buf); poke(); });
+                sockets.set(key, s);
+                return s;
+            };
+
+            // 流式解析 XUDP 帧（可跨 WebSocket message）
+            let leftover = msg.slice(i);
+            const processFrames = chunk => {
+                let buf = Buffer.concat([leftover, chunk]);
+                let off = 0;
+                while (buf.length - off >= 2) {
+                    const frameLen = buf.readUInt16BE(off);
+                    if (buf.length - off < 2 + frameLen) break;                 // 帧头块不全
+                    const frametype = buf.readUInt8(off + 4);
+                    const option = buf.readUInt8(off + 5);
+                    if (frametype === 3) { try { ws.close(); } catch { } return; } // End
+                    const hasData = (option & 1) === 1;
+                    let frameTotal = 2 + frameLen;
+                    if (hasData) {
+                        if (buf.length - off < 2 + frameLen + 2) break;         // 数据长字段不全
+                        const payloadLen = buf.readUInt16BE(off + 2 + frameLen);
+                        if (buf.length - off < 2 + frameLen + 2 + payloadLen) break; // 数据不全
+                        const a = parseAddr(buf, off + 7);
+                        const addrBuf = buf.slice(off + 7, a.off);
+                        const payload = buf.slice(off + 2 + frameLen + 2, off + 2 + frameLen + 2 + payloadLen);
+                        if (a.host) {
+                            const s = getSocket(a.host, a.port, a.atyp, addrBuf);
+                            try { s.send(payload, a.port, a.host); } catch { }
+                            poke();
+                        }
+                        frameTotal = 2 + frameLen + 2 + payloadLen;
+                    }
+                    off += frameTotal;
+                }
+                leftover = buf.slice(off);
+            };
+
+            poke();
+            processFrames(Buffer.alloc(0));
+            ws.on('message', data => processFrames(Buffer.from(data)));
+            ws.on('close', () => { if (idle) clearTimeout(idle); closeAll(); });
+            ws.on('error', () => { if (idle) clearTimeout(idle); closeAll(); });
+        } else {
+            // ===== VLESS TCP relay（原逻辑） =====
+            const duplex = createWebSocketStream(ws);
+            net.connect({ host, port }, function () {
+                this.write(msg.slice(i));
+                duplex.on('error', () => { }).pipe(this).on('error', () => { }).pipe(duplex);
+            }).on('error', () => { });
+        }
     }).on('error', () => { });
 });
