@@ -340,15 +340,15 @@ https://<你的ARGO域名>/<你的UUID>/clash
 4. 在 **URL** 栏粘贴上面的订阅地址。
 5. 点击 **导入** / **Save**。
 6. 导入成功后，你会看到以下配置被自动加载：
-   - **代理组 `Proxy-Select`**：主入口，包含 Auto-Fallback 和隧道域名节点（Argo-Fixed / Argo-Tmp）
+   - **代理组 `Proxy-Select`**：主入口，包含 Auto-Fallback、隧道域名节点（Argo-Fixed / Argo-Tmp）和 `cf-ip` 组
    - **代理组 `Auto-Fallback`**：自动优先走固定隧道，失败无感切换到临时隧道
-   - **代理组 `cf-ip`**（配置了优选 IP 时）：所有优选 IP 节点（Argo-Fixed-1..N / Argo-Tmp-1..N），url-test 自动选延迟最低者；独立于主代理组，需要时手动选用
+   - **代理组 `cf-ip`**（配置了优选 IP 时）：所有优选 IP 节点（Argo-Fixed-1..N / Argo-Tmp-1..N），url-test 自动选延迟最低者；在 `Proxy-Select` 中选中即可切换使用
    - **分流规则**：国内直连，境外走代理
 
 7. 在 **Proxies**（代理）页面，`Proxy-Select` 保持选择 `Auto-Fallback` 即可。
 8. 点击 **System Proxy**（系统代理）或 **TUN 模式** 开关，即可开始使用。
 
-> **💡 什么时候用 `cf-ip` 组**：域名节点走 Cloudflare 默认路由，稳定但延迟一般；`cf-ip` 组走你实测最优的 IP，延迟可能更好。想对比时，把客户端的出口从 `Proxy-Select` 切到 `cf-ip` 即可（例如在 Clash Verge 的代理页直接点选 `cf-ip` 组作为出口，或把规则中的 `Proxy-Select` 改为 `cf-ip`）。
+> **💡 什么时候用 `cf-ip` 组**：域名节点走 Cloudflare 默认路由，稳定但延迟一般；`cf-ip` 组走你实测最优的 IP，延迟可能更好。想对比时，在 `Proxy-Select` 中直接选中 `cf-ip` 即可。
 
 ### 8.3 如果只用了临时隧道（没配固定域名）
 

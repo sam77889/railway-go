@@ -107,7 +107,10 @@ function buildClashYaml() {
     if (proxies.length === 0) return null;
 
     const proxyList = domainNames.map(n => `      - ${n}`).join('\n');
-    const selectList = ['Auto-Fallback', ...domainNames].map(n => `      - ${n}`).join('\n');
+    // Proxy-Select 可选项：Auto-Fallback + 域名节点 + cf-ip 组（组引用，其成员不直接进入主组）
+    const selectItems = ['Auto-Fallback', ...domainNames];
+    if (cfIpNames.length > 0) selectItems.push('cf-ip');
+    const selectList = selectItems.map(n => `      - ${n}`).join('\n');
     // 优选 IP 独立代理组：url-test 自动选择延迟最低节点，不进 Proxy-Select / Auto-Fallback
     const cfIpGroup = cfIpNames.length > 0
         ? `\n\n  - name: cf-ip\n    type: url-test\n    url: https://www.gstatic.com/generate_204\n    interval: 300\n    tolerance: 50\n    lazy: false\n    proxies:\n${cfIpNames.map(n => `      - ${n}`).join('\n')}`

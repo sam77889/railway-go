@@ -192,7 +192,7 @@ https://<Argo域名>/<你的UUID>/clash
 2. **优选 IP 独立代理组 `cf-ip`**（配置了 `CF_IP` 或存在 `result.csv` 时生成）：
    - 每个优选 IP 一个节点（`Argo-Fixed-1..N` / `Argo-Tmp-1..N`）。
    - 采用 `url-test` 自动测速，始终选用延迟最低的 IP。
-   - **不进入** `Proxy-Select` / `Auto-Fallback`，需要时在客户端手动切换到 `cf-ip` 组使用。
+   - 以**组引用**形式加入 `Proxy-Select` 可选列表（成员节点不直接进入主组，也不进 `Auto-Fallback`），在 `Proxy-Select` 中选中 `cf-ip` 即可切换使用。
 3. **完整 DNS 配置**：内置 `fake-ip` 模式及国内 DNS 分流，防止 DNS 污染。
 4. **智能分流规则**：内置国内域名/IP 直连规则，境外流量走 VLESS 节点。
 
