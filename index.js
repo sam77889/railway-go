@@ -1,19 +1,22 @@
 // ============================================================
-// Railway Argo VLESS-WS 轻量节点 — Node.js 服务端
+// Railway Argo VLESS-WS 轻量节点 — Node.js 服务端（双隧道版）
 //
-// 基于 quick-deploy/index.js，适配 Argo 隧道：
-// - 域名从 /tmp/argo_domain 动态读取（start.sh 写入）
-// - 支持 CF 优选 IP（CF_IP 环境变量）
-// - 健康检查保持 Railway 容器存活
-// - 纯 Node.js 实现 VLESS 协议，无需 Xray/sing-box
+// 端点：
+//   GET /              健康检查（Railway healthcheck）
+//   GET /{uuid}        双节点 vless:// 链接（每行一条）
+//   GET /{uuid}/clash  完整 Clash YAML 配置（Mihomo/Clash Meta）
+//   WS                 VLESS 协议处理
+//
+// 域名来源：
+//   固定隧道: 环境变量 ARGO_DOMAIN 或 /tmp/argo_domain_fixed
+//   临时隧道: /tmp/argo_domain_tmp（start.sh 写入）
 // ============================================================
 
 const os = require('os');
 const fs = require('fs');
 const http = require('http');
 const net = require('net');
-const { createWebSocketStream } = require('ws');
-const { Server: WSServer } = require('ws');
+const { createWebSocketStream, Server: WSServer } = require('ws');
 
 // ===== 配置 =====
 const NAME = process.env.NAME || 'argo';
@@ -21,48 +24,242 @@ const PORT = process.env.PORT || 8080;
 const uuid = process.env.uuid || '79411d85-b0dc-4cd2-b46c-01789a18c650';
 const CF_IP = process.env.CF_IP || '';
 
-// ===== 动态获取 Argo 域名 =====
-function getArgoDomain() {
-    // 优先：环境变量（固定隧道）
+// ===== 域名获取 =====
+function getFixedDomain() {
     if (process.env.ARGO_DOMAIN) return process.env.ARGO_DOMAIN;
-    // 其次：start.sh 写入的文件（临时隧道）
-    try {
-        return fs.readFileSync('/tmp/argo_domain', 'utf8').trim();
-    } catch {
-        return null;
-    }
+    try { return fs.readFileSync('/tmp/argo_domain_fixed', 'utf8').trim(); } catch { return null; }
 }
 
-// ===== 生成 VLESS 节点链接 =====
-function buildVlessLink() {
-    const domain = getArgoDomain();
-    if (!domain) return null;
+function getTmpDomain() {
+    try { return fs.readFileSync('/tmp/argo_domain_tmp', 'utf8').trim(); } catch { return null; }
+}
+
+// ===== VLESS 链接生成 =====
+function buildVlessLink(domain, tag) {
     const addr = CF_IP || domain;
-    return `vless://${uuid}@${addr}:443?encryption=none&security=tls&sni=${domain}&fp=chrome&type=ws&host=${domain}&path=%2F#Vl-${NAME}`;
+    return `vless://${uuid}@${addr}:443?encryption=none&security=tls&sni=${domain}&fp=chrome&type=ws&host=${domain}&path=%2F#Vl-${tag}-${NAME}`;
+}
+
+function getAllVlessLinks() {
+    const links = [];
+    const fixed = getFixedDomain();
+    const tmp = getTmpDomain();
+    if (fixed) links.push(buildVlessLink(fixed, 'fixed'));
+    if (tmp) links.push(buildVlessLink(tmp, 'tmp'));
+    return links;
+}
+
+// ===== Clash YAML 生成 =====
+function buildClashProxy(name, domain) {
+    const server = CF_IP || domain;
+    return [
+        `  - name: ${name}`,
+        `    type: vless`,
+        `    server: ${server}`,
+        `    port: 443`,
+        `    uuid: ${uuid}`,
+        `    network: ws`,
+        `    tls: true`,
+        `    udp: false`,
+        `    servername: ${domain}`,
+        `    client-fingerprint: chrome`,
+        `    ws-opts:`,
+        `      path: "/"`,
+        `      headers:`,
+        `        Host: ${domain}`,
+    ].join('\n');
+}
+
+function buildClashYaml() {
+    const fixed = getFixedDomain();
+    const tmp = getTmpDomain();
+    const proxies = [];
+    const proxyNames = [];
+
+    if (fixed) {
+        proxies.push(buildClashProxy('Argo-Fixed', fixed));
+        proxyNames.push('Argo-Fixed');
+    }
+    if (tmp) {
+        proxies.push(buildClashProxy('Argo-Tmp', tmp));
+        proxyNames.push('Argo-Tmp');
+    }
+
+    if (proxyNames.length === 0) return null;
+
+    const proxyList = proxyNames.map(n => `      - ${n}`).join('\n');
+    const selectList = ['Auto-Fallback', ...proxyNames].map(n => `      - ${n}`).join('\n');
+
+    return `# Railway Argo VLESS-WS 双隧道 — Clash Meta / Mihomo 配置
+# 自动生成，请勿手动编辑
+# 订阅地址: /{uuid}/clash
+
+mixed-port: 7890
+allow-lan: true
+mode: rule
+log-level: info
+unified-delay: true
+tcp-concurrent: true
+find-process-mode: strict
+profile:
+  store-selected: true
+  store-fake-ip: true
+
+dns:
+  enable: true
+  listen: "0.0.0.0:1053"
+  ipv6: false
+  prefer-h3: false
+  respect-rules: true
+  use-system-hosts: true
+  cache-algorithm: "arc"
+  enhanced-mode: "fake-ip"
+  fake-ip-range: "198.18.0.1/16"
+  fake-ip-filter:
+    - "+.argotunnel.com"
+    - "+.lan"
+    - "+.local"
+    - "+.msftconnecttest.com"
+    - "+.msftncsi.com"
+    - "localhost.ptlogin2.qq.com"
+    - "localhost.sec.qq.com"
+    - "+.in-addr.arpa"
+    - "+.ip6.arpa"
+    - "time.*.com"
+    - "time.*.gov"
+    - "pool.ntp.org"
+    - "localhost.work.weixin.qq.com"
+  default-nameserver: ["223.5.5.5", "119.29.29.29"]
+  nameserver:
+    - "https://1.1.1.1/dns-query"
+    - "https://8.8.8.8/dns-query"
+  nameserver-policy:
+    "geosite:cn":
+      - "https://223.5.5.5/dns-query"
+      - "https://doh.pub/dns-query"
+    "+.cn":
+      - "https://223.5.5.5/dns-query"
+      - "https://doh.pub/dns-query"
+  proxy-server-nameserver:
+    - "https://223.5.5.5/dns-query"
+    - "https://doh.pub/dns-query"
+
+sniffer:
+  enable: true
+  force-dns-mapping: true
+  parse-pure-ip: true
+  sniff:
+    HTTP:
+      ports: [80, 8080-8880]
+      override-destination: true
+    TLS:
+      ports: [443, 8443]
+    QUIC:
+      ports: [443, 8443]
+  skip-domain:
+    - "Mijia Cloud"
+    - "+.push.apple.com"
+
+proxies:
+${proxies.join('\n\n')}
+
+proxy-groups:
+  - name: Proxy-Select
+    type: select
+    proxies:
+${selectList}
+
+  - name: Auto-Fallback
+    type: fallback
+    url: https://www.gstatic.com/generate_204
+    interval: 60
+    timeout: 3000
+    max-failed-times: 2
+    lazy: false
+    proxies:
+${proxyList}
+
+rules:
+  - PROCESS-NAME,cloudflared,DIRECT
+  - DOMAIN-SUFFIX,argotunnel.com,DIRECT
+  - DOMAIN-SUFFIX,chinamobile.com,DIRECT
+  - DOMAIN-SUFFIX,deepseek.com,DIRECT
+  - DOMAIN-SUFFIX,baidu.com,DIRECT
+  - DOMAIN-SUFFIX,qq.com,DIRECT
+  - DOMAIN-SUFFIX,taobao.com,DIRECT
+  - DOMAIN-SUFFIX,tmall.com,DIRECT
+  - DOMAIN-SUFFIX,jd.com,DIRECT
+  - DOMAIN-SUFFIX,tencent.com,DIRECT
+  - DOMAIN-SUFFIX,alipay.com,DIRECT
+  - DOMAIN-SUFFIX,aliyun.com,DIRECT
+  - DOMAIN-SUFFIX,163.com,DIRECT
+  - DOMAIN-SUFFIX,zhihu.com,DIRECT
+  - DOMAIN-SUFFIX,bilibili.com,DIRECT
+  - DOMAIN-SUFFIX,douyin.com,DIRECT
+  - DOMAIN-SUFFIX,xiaohongshu.com,DIRECT
+  - DOMAIN-SUFFIX,xiaomi.com,DIRECT
+  - DOMAIN-SUFFIX,huawei.com,DIRECT
+  - DOMAIN-SUFFIX,weibo.com,DIRECT
+  - DOMAIN-SUFFIX,douban.com,DIRECT
+  - DOMAIN-SUFFIX,youku.com,DIRECT
+  - DOMAIN-SUFFIX,iqiyi.com,DIRECT
+  - DOMAIN-SUFFIX,meituan.com,DIRECT
+  - DOMAIN-SUFFIX,dianping.com,DIRECT
+  - DOMAIN-SUFFIX,ctrip.com,DIRECT
+  - DOMAIN-SUFFIX,12306.cn,DIRECT
+  - DOMAIN-SUFFIX,gov.cn,DIRECT
+  - DOMAIN-SUFFIX,edu.cn,DIRECT
+  - DOMAIN-SUFFIX,cn,DIRECT
+  - GEOSITE,cn,DIRECT
+  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve
+  - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve
+  - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,224.0.0.0/4,DIRECT,no-resolve
+  - GEOIP,CN,DIRECT
+  - MATCH,Proxy-Select
+`;
 }
 
 // ===== HTTP 服务 =====
 const server = http.createServer((req, res) => {
-    // 健康检查（Railway healthcheckPath 指向这里）
+    // 健康检查
     if (req.url === '/') {
         res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-        res.end('🟢 Argo VLESS-WS 节点运行中\n');
+        res.end('🟢 Argo VLESS-WS 双隧道节点运行中\n');
         return;
     }
 
-    // 节点链接页
+    // 双节点 vless:// 链接
     if (req.url === `/${uuid}`) {
-        const link = buildVlessLink();
+        const links = getAllVlessLinks();
         res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-        if (link) {
-            res.end(link + '\n');
+        if (links.length > 0) {
+            res.end(links.join('\n') + '\n');
         } else {
             res.end('⏳ Argo 隧道域名尚未就绪，请稍后刷新\n');
         }
         return;
     }
 
-    // 其他路径返回 404
+    // Clash YAML 订阅
+    if (req.url === `/${uuid}/clash`) {
+        const yaml = buildClashYaml();
+        if (yaml) {
+            res.writeHead(200, {
+                'Content-Type': 'text/yaml; charset=utf-8',
+                'Content-Disposition': 'attachment; filename="argo-clash.yaml"',
+                'Profile-Update-Interval': '6',
+            });
+            res.end(yaml);
+        } else {
+            res.writeHead(503, { 'Content-Type': 'text/plain; charset=utf-8' });
+            res.end('⏳ Argo 隧道域名尚未就绪，请稍后刷新\n');
+        }
+        return;
+    }
+
+    // 404
     res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('404 Not Found');
 });
@@ -87,19 +284,17 @@ wss.on('connection', ws => {
         const port = msg.slice(i, i += 2).readUInt16BE(0);
         const ATYP = msg.slice(i, i += 1).readUInt8();
 
-        // 解析目标地址
         const host = ATYP == 1
-            ? msg.slice(i, i += 4).join('.')                                          // IPv4
+            ? msg.slice(i, i += 4).join('.')
             : (ATYP == 2
                 ? new TextDecoder().decode(
-                    msg.slice(i + 1, i += 1 + msg.slice(i, i + 1).readUInt8()))       // 域名
+                    msg.slice(i + 1, i += 1 + msg.slice(i, i + 1).readUInt8()))
                 : (ATYP == 3
-                    ? msg.slice(i, i += 16)                                            // IPv6
+                    ? msg.slice(i, i += 16)
                         .reduce((s, b, idx, a) => (idx % 2 ? s.concat(a.slice(idx - 1, idx + 1)) : s), [])
                         .map(b => b.readUInt16BE(0).toString(16)).join(':')
                     : ''));
 
-        // 回复客户端，建立双向转发
         ws.send(new Uint8Array([VERSION, 0]));
         const duplex = createWebSocketStream(ws);
         net.connect({ host, port }, function () {
