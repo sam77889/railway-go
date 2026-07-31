@@ -1,9 +1,9 @@
 {
-  "name": "railway-argo-vless-ws",
+  "name": "railway-cloudflare_tunnel-vless-ws",
   "version": "1.0.0",
-  "description": "Argo Tunnel + VLESS-WS lightweight node for Railway (lowest cost)",
+  "description": "Cloudflare Tunnel Tunnel + VLESS-WS lightweight node for Railway (lowest cost)",
   "main": "index.js",
-  "author": "based on yonggekkk/argosbx",
+  "author": "based on yonggekkk/cloudflare_tunnelsbx",
   "license": "MIT",
   "private": true,
   "scripts": {

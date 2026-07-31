@@ -4,20 +4,20 @@
       "description": "节点身份认证 UUID。系统已默认配置随机生成，您也可以手动指定自己的固定 UUID（推荐固定 UUID，避免重部署后节点变动）。",
       "generator": "uuid"
     },
-    "ARGO_TOKEN": {
+    "CLOUDFLARE_TUNNEL_TOKEN": {
       "description": "【双隧道可选】Cloudflare Zero Trust 隧道 Token。不填则仅开启随机域名的临时隧道。",
       "defaultValue": ""
     },
-    "ARGO_DOMAIN": {
+    "CLOUDFLARE_TUNNEL_DOMAIN": {
       "description": "【双隧道可选】您绑定到上述固定隧道的域名 (例如 proxy.example.com)。",
       "defaultValue": ""
     },
     "NAME": {
       "description": "生成的节点名称前缀 (Node Name Prefix)。",
-      "defaultValue": "argo"
+      "defaultValue": "cloudflare_tunnel"
     },
     "CF_IP": {
-      "description": "【可选】Cloudflare 优选 IP，逗号分隔多个（每个 IP 生成一个节点，配合 Auto-Fallback 自动选优）。不填则自动从仓库 result.csv 提取延迟最低的前 5 个 IP (SNI 仍维持 Argo 域名)。",
+      "description": "【可选】Cloudflare 优选 IP，逗号分隔多个（每个 IP 生成一个节点，配合 Auto-Fallback 自动选优）。不填则自动从仓库 result.csv 提取延迟最低的前 5 个 IP (SNI 仍维持 Cloudflare Tunnel 域名)。",
       "defaultValue": ""
     }
   }

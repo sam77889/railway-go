@@ -1,10 +1,10 @@
-# Railway Argo VLESS-WS 双隧道轻量节点
+# Railway Cloudflare Tunnel VLESS-WS 双隧道轻量节点
 
 [![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/new)
 
-> **Cloudflare Argo 双隧道（固定 + 临时并行） + 纯 Node.js VLESS-WS + Clash / Mihomo 订阅 — Railway 上极高可用与超低成本的抗封节点方案**
+> **Cloudflare Cloudflare Tunnel 双隧道（固定 + 临时并行） + 纯 Node.js VLESS-WS + Clash / Mihomo 订阅 — Railway 上极高可用与超低成本的抗封节点方案**
 >
-> 流量链路：`客户端 → Cloudflare CDN (443/TLS) → Argo 双隧道 → cloudflared → Node.js VLESS-WS / 订阅服务 → 目标站点`
+> 流量链路：`客户端 → Cloudflare CDN (443/TLS) → Cloudflare Tunnel 双隧道 → cloudflared → Node.js VLESS-WS / 订阅服务 → 目标站点`
 >
 > 整理时间：2026-07-31
 
@@ -12,11 +12,11 @@
 
 ## 一、方案概述
 
-本方案在单隧道的基础上升级为 **Argo 双隧道架构** 并内置 **Clash / Mihomo YAML 订阅服务器**。在维持超低内存与成本的同时，实现了节点的高度稳定与自动化切换。
+本方案在单隧道的基础上升级为 **Cloudflare Tunnel 双隧道架构** 并内置 **Clash / Mihomo YAML 订阅服务器**。在维持超低内存与成本的同时，实现了节点的高度稳定与自动化切换。
 
 ### 与现有方案对比
 
-| 维度 | quick-deploy (直连) | 传统单 Argo 隧道 | **本方案 (Argo 双隧道)** | 完整 argosbx |
+| 维度 | quick-deploy (直连) | 传统单 Cloudflare Tunnel 隧道 | **本方案 (Cloudflare Tunnel 双隧道)** | 完整 cloudflare_tunnelsbx |
 |---|---|---|---|---|
 | **抗封能力** | ❌ Railway 域名特征明显 | ✅ 隐藏在 CF 后 | ✅ **双重防护 + 自动备用** | ✅ 同等 |
 | **高可用性** | ❌ 依赖单域名 | ⚠️ 依赖固定或临时单隧道 | ⚡ **固定 + 临时双隧道并发** | ⚠️ 依赖单隧道 |
@@ -35,7 +35,7 @@
 客户端                                │   ┌─────────────────┐    ┌──────────────────────────┐  │     ┌──────┐
 ┌───────────┐  Cloudflare CDN         │   │  cloudflared    │───→│                          │  │     │      │
 │Clash Verge│ ┌───────────────┐ 443/TLS│   │(固定隧道进程)   │    │                          │  │     │      │
-│ / Mihomo  │─┼─► ARGO_DOMAIN │───────┼───► └─────────────────┘    │                          │──┼────►│目标  │
+│ / Mihomo  │─┼─► CLOUDFLARE_TUNNEL_DOMAIN │───────┼───► └─────────────────┘    │                          │──┼────►│目标  │
 │           │ │               │       │                        │ Node.js 服务 (PORT)       │  │     │站点  │
 │(Auto-     │ │               │ 443/TLS│   ┌─────────────────┐    │ - VLESS-WS 代理协议      │  │     │      │
 │ Fallback) │─┼─► trycloudflare│───────┼───► cloudflared     │───→│ - vless:// 节点链接输出  │──┼────►│      │
@@ -86,7 +86,7 @@
 | 模式 | 环境变量 | 说明 | 特点 |
 |---|---|---|---|
 | **仅临时隧道** | 只需设置 `uuid` | 只启动 1 个 cloudflared 进程，自动分配 `*.trycloudflare.com` | 免配置 Cloudflare 域名，适合快速试用（重启会变域名） |
-| **双隧道并行** *(推荐)* | 设置 `uuid` + `ARGO_TOKEN` + `ARGO_DOMAIN` | 同时启动固定隧道和临时隧道，生成两个节点 | **固定节点作主用，临时节点作备用**，配合 Clash 自动回退，域名失效秒切 |
+| **双隧道并行** *(推荐)* | 设置 `uuid` + `CLOUDFLARE_TUNNEL_TOKEN` + `CLOUDFLARE_TUNNEL_DOMAIN` | 同时启动固定隧道和临时隧道，生成两个节点 | **固定节点作主用，临时节点作备用**，配合 Clash 自动回退，域名失效秒切 |
 
 ---
 
@@ -95,14 +95,14 @@
 ### 4.1 准备 GitHub 仓库
 
 ```bash
-# 进入 argo-tunnel 目录
-cd /home/san/railway_docker/argo-tunnel
+# 进入 cloudflare-tunnel 目录
+cd /home/san/railway_docker/cloudflare-tunnel
 
 # 初始化 Git 仓库
-git init && git add . && git commit -m "railway argo dual-tunnel vless deploy"
+git init && git add . && git commit -m "railway cloudflare_tunnel dual-tunnel vless deploy"
 
 # 在 GitHub 新建一个空仓库，然后推送：
-git remote add origin https://github.com/<你的用户名>/railway-argo-node.git
+git remote add origin https://github.com/<你的用户名>/railway-cloudflare_tunnel-node.git
 git branch -M main
 git push -u origin main
 ```
@@ -129,26 +129,26 @@ git push -u origin main
 #### 模式二：双隧道并行（推荐配置）
 
 * `uuid`：保留系统生成的 UUID 或填入你自己的固定 UUID。
-* `ARGO_TOKEN`：填入你从 Cloudflare 获取的隧道 Token（`eyJhIjoixxxx...`）。
-* `ARGO_DOMAIN`：填入绑定的自定义域名（如 `your-proxy.example.com`）。
+* `CLOUDFLARE_TUNNEL_TOKEN`：填入你从 Cloudflare 获取的隧道 Token（`eyJhIjoixxxx...`）。
+* `CLOUDFLARE_TUNNEL_DOMAIN`：填入绑定的自定义域名（如 `your-proxy.example.com`）。
 * `NAME`：自定义节点名称前缀。
 
 > **可选：CF 优选 IP**
 > 配置 `CF_IP` 变量即可（如 `CF_IP=104.16.0.1`，支持逗号分隔多个：`CF_IP=104.16.0.1,108.162.196.94`）。
-> 设置后，每个优选 IP 各生成一个节点（Argo-Fixed-1、Argo-Fixed-2 ...），连接地址使用优选 IP，SNI/Host 仍维持 Argo 域名，配合 Auto-Fallback 自动选优。
+> 设置后，每个优选 IP 各生成一个节点（Cloudflare-Tunnel-Fixed-1、Cloudflare-Tunnel-Fixed-2 ...），连接地址使用优选 IP，SNI/Host 仍维持 Cloudflare Tunnel 域名，配合 Auto-Fallback 自动选优。
 > 未手动设置 `CF_IP` 时，启动脚本会自动从仓库根目录的 `result.csv`（CloudflareSpeedTest 测速结果）中提取丢包率为 0 且测速有效的前 5 个低延迟 IP——更新优选 IP 只需替换该文件并推送。
 
-### 4.4 获取 Argo 固定隧道 Token（针对模式二）
+### 4.4 获取 Cloudflare Tunnel 固定隧道 Token（针对模式二）
 
 1. 登录 [Cloudflare Dashboard](https://dash.cloudflare.com/)
 2. 左侧 **Zero Trust** → **Networks** → **Tunnels**
 3. 点 **Create a tunnel** → 选 **Cloudflared** → 输入隧道名称
-4. 复制显示的 **Token**（`eyJhIjoixxxx...`）→ 填入 Railway 环境变量 `ARGO_TOKEN`
+4. 复制显示的 **Token**（`eyJhIjoixxxx...`）→ 填入 Railway 环境变量 `CLOUDFLARE_TUNNEL_TOKEN`
 5. 在 **Public Hostname** 添加：
    - Subdomain + Domain = 你想用的域名（如 `proxy.example.com`）
    - Service Type = `HTTP`
    - URL = `localhost:8080`
-6. 保存后将该域名填入 Railway 环境变量 `ARGO_DOMAIN`
+6. 保存后将该域名填入 Railway 环境变量 `CLOUDFLARE_TUNNEL_DOMAIN`
 
 ---
 
@@ -160,11 +160,11 @@ git push -u origin main
 
 在浏览器或 HTTP 客户端访问：
 ```text
-https://<Argo域名>/<你的UUID>
+https://<Cloudflare Tunnel域名>/<你的UUID>
 ```
 将返回纯文本格式的 `vless://` 节点导入链接（每行一条）：
 - 包含已就绪的固定隧道节点与临时隧道节点（如 `vless://...`）
-- 若隧道域名尚未就绪，则提示 `⏳ Argo 隧道域名尚未就绪，请稍后刷新`
+- 若隧道域名尚未就绪，则提示 `⏳ Cloudflare Tunnel 隧道域名尚未就绪，请稍后刷新`
 
 ### 5.2 Endpoint 列表
 
@@ -181,16 +181,16 @@ https://<Argo域名>/<你的UUID>
 
 **订阅 URL：**
 ```text
-https://<Argo域名>/<你的UUID>/clash
+https://<Cloudflare Tunnel域名>/<你的UUID>/clash
 ```
 
 ### 订阅自动配置特性
 
-1. **隧道域名节点（Argo-Fixed + Argo-Tmp）**：进入 `Proxy-Select` / `Auto-Fallback` 主代理组。
-   - `Auto-Fallback` 默认优先使用 **Argo-Fixed**（固定隧道）。
-   - 当固定隧道断连或域名失效时，秒级自动无缝回退至 **Argo-Tmp**（临时隧道）。
+1. **隧道域名节点（Cloudflare-Tunnel-Fixed + Cloudflare-Tunnel-Tmp）**：进入 `Proxy-Select` / `Auto-Fallback` 主代理组。
+   - `Auto-Fallback` 默认优先使用 **Cloudflare-Tunnel-Fixed**（固定隧道）。
+   - 当固定隧道断连或域名失效时，秒级自动无缝回退至 **Cloudflare-Tunnel-Tmp**（临时隧道）。
 2. **优选 IP 独立代理组 `cf-ip`**（配置了 `CF_IP` 或存在 `result.csv` 时生成）：
-   - 每个优选 IP 一个节点（`Argo-Fixed-1..N` / `Argo-Tmp-1..N`）。
+   - 每个优选 IP 一个节点（`Cloudflare-Tunnel-Fixed-1..N` / `Cloudflare-Tunnel-Tmp-1..N`）。
    - 采用 `url-test` 自动测速，始终选用延迟最低的 IP。
    - 以**组引用**形式加入 `Proxy-Select` 可选列表（成员节点不直接进入主组，也不进 `Auto-Fallback`），在 `Proxy-Select` 中选中 `cf-ip` 即可切换使用。
 3. **完整 DNS 配置**：内置 `fake-ip` 模式及国内 DNS 分流，防止 DNS 污染。
@@ -203,9 +203,9 @@ https://<Argo域名>/<你的UUID>/clash
 | 变量 | 必填 | 默认值 | 说明 |
 |---|---|---|---|
 | `uuid` | ✅ 必填 | 无 | 节点 UUID，**务必生成固定值** |
-| `ARGO_TOKEN` | 否（双隧道必填）| 空 | Cloudflare Zero Trust 隧道 Token |
-| `ARGO_DOMAIN` | 否（双隧道必填）| 空 | 固定隧道自定义域名 |
-| `NAME` | 否 | `argo` | 节点名称前缀 |
+| `CLOUDFLARE_TUNNEL_TOKEN` | 否（双隧道必填）| 空 | Cloudflare Zero Trust 隧道 Token |
+| `CLOUDFLARE_TUNNEL_DOMAIN` | 否（双隧道必填）| 空 | 固定隧道自定义域名 |
+| `NAME` | 否 | `cloudflare_tunnel` | 节点名称前缀 |
 | `CF_IP` | 否 | 自动读 `result.csv` | Cloudflare 优选 IP，逗号分隔多个（每 IP 一个节点）。未设置时自动从仓库 `result.csv` 提取前 5 个低延迟 IP |
 | `PORT` | ❌ 不要手动设 | `8080` (Railway 注入)| 内部服务监听端口 |
 
@@ -218,15 +218,15 @@ https://<Argo域名>/<你的UUID>/clash
 | 配置项 | 值 |
 |---|---|
 | 协议 | VLESS |
-| 地址 (Address) | Argo 域名 或 CF 优选 IP |
+| 地址 (Address) | Cloudflare Tunnel 域名 或 CF 优选 IP |
 | 端口 (Port) | 443 |
 | 用户 ID (UUID) | 你设置的 `uuid` |
 | 加密方式 | none |
 | 传输协议 (Network) | ws |
 | 伪装路径 (Path) | `/` |
-| 伪装域名 (Host) | Argo 域名 |
+| 伪装域名 (Host) | Cloudflare Tunnel 域名 |
 | 传输层安全 (TLS) | tls |
-| SNI | Argo 域名 |
+| SNI | Cloudflare Tunnel 域名 |
 | 客户端指纹 | chrome |
 
 ---
@@ -236,9 +236,9 @@ https://<Argo域名>/<你的UUID>/clash
 ### 流量链路
 
 ```
-1. 客户端发起连接 → 访问 Argo 域名 / 优选 IP 的 443 端口 (TLS)
+1. 客户端发起连接 → 访问 Cloudflare Tunnel 域名 / 优选 IP 的 443 端口 (TLS)
 2. 请求到达 Cloudflare CDN 边缘节点
-3. Cloudflare 通过 Argo 双隧道长连接转发至容器内对应的 cloudflared 进程
+3. Cloudflare 通过 Cloudflare Tunnel 双隧道长连接转发至容器内对应的 cloudflared 进程
 4. cloudflared 将流量解密并转发至本地 Node.js 服务 (localhost:8080)
 5. Node.js VLESS 服务验证 UUID 并解包：
    - 若为节点链接 / 订阅请求 (如 /<uuid> 或 /<uuid>/clash)，返回纯文本 vless:// 链接或 YAML 配置文件
@@ -251,10 +251,10 @@ https://<Argo域名>/<你的UUID>/clash
 
 | 现象 | 原因与解决方法 |
 |---|---|
-| 日志显示 "Argo 域名未就绪" | cloudflared 建立隧道需要数秒时间，属于正常等待过程；若持续未就绪请检查 `ARGO_TOKEN` 是否有效。 |
-| 临时隧道域名每次重启都变 | 临时隧道特性如此。推荐配置 `ARGO_TOKEN` 与 `ARGO_DOMAIN` 开启双隧道模式，配合 Clash 订阅实现无感切换。 |
-| Clash 订阅无法更新 | 确认订阅 URL 格式是否正确：`https://<Argo域名>/<UUID>/clash`，并确保 UUID 与环境变量一致。 |
-| 节点连接失败 | 1) 检查客户端 UUID 拼写；2) 检查 TLS 是否开启，SNI 与 Host 是否填入对应的 Argo 域名。 |
+| 日志显示 "Cloudflare Tunnel 域名未就绪" | cloudflared 建立隧道需要数秒时间，属于正常等待过程；若持续未就绪请检查 `CLOUDFLARE_TUNNEL_TOKEN` 是否有效。 |
+| 临时隧道域名每次重启都变 | 临时隧道特性如此。推荐配置 `CLOUDFLARE_TUNNEL_TOKEN` 与 `CLOUDFLARE_TUNNEL_DOMAIN` 开启双隧道模式，配合 Clash 订阅实现无感切换。 |
+| Clash 订阅无法更新 | 确认订阅 URL 格式是否正确：`https://<Cloudflare Tunnel域名>/<UUID>/clash`，并确保 UUID 与环境变量一致。 |
+| 节点连接失败 | 1) 检查客户端 UUID 拼写；2) 检查 TLS 是否开启，SNI 与 Host 是否填入对应的 Cloudflare Tunnel 域名。 |
 | Railway 容器休眠 | Railway 免费/Standard 计划特性；客户端发起请求后会快速唤醒容器。 |
 
 ---

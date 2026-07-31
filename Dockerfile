@@ -1,5 +1,5 @@
 # ============================================================
-# Railway Argo VLESS-WS 轻量节点 — Dockerfile
+# Railway Cloudflare Tunnel VLESS-WS 轻量节点 — Dockerfile
 # 
 # 设计目标：极致轻量，最低成本
 # - node:20-alpine 基础镜像（~50MB）

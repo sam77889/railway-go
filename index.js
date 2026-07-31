@@ -1,5 +1,5 @@
 // ============================================================
-// Railway Argo VLESS-WS 轻量节点 — Node.js 服务端（双隧道版）
+// Railway Cloudflare Tunnel VLESS-WS 轻量节点 — Node.js 服务端（双隧道版）
 //
 // 端点：
 //   GET /              健康检查（Railway healthcheck）
@@ -8,8 +8,8 @@
 //   WS                 VLESS 协议处理
 //
 // 域名来源：
-//   固定隧道: 环境变量 ARGO_DOMAIN 或 /tmp/argo_domain_fixed
-//   临时隧道: /tmp/argo_domain_tmp（start.sh 写入）
+//   固定隧道: 环境变量 CLOUDFLARE_TUNNEL_DOMAIN 或 /tmp/cloudflare_tunnel_domain_fixed
+//   临时隧道: /tmp/cloudflare_tunnel_domain_tmp（start.sh 写入）
 // ============================================================
 
 const os = require('os');
@@ -19,7 +19,7 @@ const net = require('net');
 const { createWebSocketStream, Server: WSServer } = require('ws');
 
 // ===== 配置 =====
-const NAME = process.env.NAME || 'argo';
+const NAME = process.env.NAME || 'cloudflare_tunnel';
 const PORT = process.env.PORT || 8080;
 const uuid = process.env.uuid || '79411d85-b0dc-4cd2-b46c-01789a18c650';
 // CF_IP 支持逗号分隔的多个优选 IP（每个 IP 生成一个节点）
@@ -27,12 +27,12 @@ const CF_IPS = (process.env.CF_IP || '').split(',').map(s => s.trim()).filter(Bo
 
 // ===== 域名获取 =====
 function getFixedDomain() {
-    if (process.env.ARGO_DOMAIN) return process.env.ARGO_DOMAIN;
-    try { return fs.readFileSync('/tmp/argo_domain_fixed', 'utf8').trim(); } catch { return null; }
+    if (process.env.CLOUDFLARE_TUNNEL_DOMAIN) return process.env.CLOUDFLARE_TUNNEL_DOMAIN;
+    try { return fs.readFileSync('/tmp/cloudflare_tunnel_domain_fixed', 'utf8').trim(); } catch { return null; }
 }
 
 function getTmpDomain() {
-    try { return fs.readFileSync('/tmp/argo_domain_tmp', 'utf8').trim(); } catch { return null; }
+    try { return fs.readFileSync('/tmp/cloudflare_tunnel_domain_tmp', 'utf8').trim(); } catch { return null; }
 }
 
 // ===== VLESS 链接生成 =====
@@ -86,19 +86,19 @@ function buildClashYaml() {
     const cfIpNames = [];   // 优选 IP 节点：仅进独立代理组 cf-ip
 
     if (fixed) {
-        proxies.push(buildClashProxy('Argo-Fixed', fixed, null));
-        domainNames.push('Argo-Fixed');
+        proxies.push(buildClashProxy('Cloudflare-Tunnel-Fixed', fixed, null));
+        domainNames.push('Cloudflare-Tunnel-Fixed');
         CF_IPS.forEach((a, i) => {
-            const name = `Argo-Fixed-${i + 1}`;
+            const name = `Cloudflare-Tunnel-Fixed-${i + 1}`;
             proxies.push(buildClashProxy(name, fixed, a));
             cfIpNames.push(name);
         });
     }
     if (tmp) {
-        proxies.push(buildClashProxy('Argo-Tmp', tmp, null));
-        domainNames.push('Argo-Tmp');
+        proxies.push(buildClashProxy('Cloudflare-Tunnel-Tmp', tmp, null));
+        domainNames.push('Cloudflare-Tunnel-Tmp');
         CF_IPS.forEach((a, i) => {
-            const name = `Argo-Tmp-${i + 1}`;
+            const name = `Cloudflare-Tunnel-Tmp-${i + 1}`;
             proxies.push(buildClashProxy(name, tmp, a));
             cfIpNames.push(name);
         });
@@ -116,7 +116,7 @@ function buildClashYaml() {
         ? `\n\n  - name: cf-ip\n    type: url-test\n    url: https://www.gstatic.com/generate_204\n    interval: 300\n    tolerance: 50\n    lazy: false\n    proxies:\n${cfIpNames.map(n => `      - ${n}`).join('\n')}`
         : '';
 
-    return `# Railway Argo VLESS-WS 双隧道 — Clash Meta / Mihomo 配置
+    return `# Railway Cloudflare Tunnel VLESS-WS 双隧道 — Clash Meta / Mihomo 配置
 # 自动生成，请勿手动编辑
 # 订阅地址: /{uuid}/clash
 
@@ -252,7 +252,7 @@ const server = http.createServer((req, res) => {
     // 健康检查
     if (req.url === '/') {
         res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-        res.end('🟢 Argo VLESS-WS 双隧道节点运行中\n');
+        res.end('🟢 Cloudflare Tunnel VLESS-WS 双隧道节点运行中\n');
         return;
     }
 
@@ -263,7 +263,7 @@ const server = http.createServer((req, res) => {
         if (links.length > 0) {
             res.end(links.join('\n') + '\n');
         } else {
-            res.end('⏳ Argo 隧道域名尚未就绪，请稍后刷新\n');
+            res.end('⏳ Cloudflare Tunnel 隧道域名尚未就绪，请稍后刷新\n');
         }
         return;
     }
@@ -274,13 +274,13 @@ const server = http.createServer((req, res) => {
         if (yaml) {
             res.writeHead(200, {
                 'Content-Type': 'text/yaml; charset=utf-8',
-                'Content-Disposition': 'attachment; filename="argo-clash.yaml"',
+                'Content-Disposition': 'attachment; filename="cloudflare_tunnel-clash.yaml"',
                 'Profile-Update-Interval': '6',
             });
             res.end(yaml);
         } else {
             res.writeHead(503, { 'Content-Type': 'text/plain; charset=utf-8' });
-            res.end('⏳ Argo 隧道域名尚未就绪，请稍后刷新\n');
+            res.end('⏳ Cloudflare Tunnel 隧道域名尚未就绪，请稍后刷新\n');
         }
         return;
     }
