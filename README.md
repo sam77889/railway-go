@@ -1,44 +1,47 @@
-# Railway Argo VLESS-WS 轻量节点
+# Railway Argo VLESS-WS 双隧道轻量节点
 
-> **Cloudflare Argo 隧道 + 纯 Node.js VLESS-WS — Railway 上最低成本的抗封方案**
+> **Cloudflare Argo 双隧道（固定 + 临时并行） + 纯 Node.js VLESS-WS + Clash / Mihomo 订阅 — Railway 上极高可用与超低成本的抗封节点方案**
 >
-> 流量链路：`客户端 → Cloudflare CDN (443/TLS) → Argo 隧道 → cloudflared → Node.js VLESS-WS → 目标站点`
+> 流量链路：`客户端 → Cloudflare CDN (443/TLS) → Argo 双隧道 → cloudflared → Node.js VLESS-WS / 订阅服务 → 目标站点`
 >
 > 整理时间：2026-07-31
 
 ---
 
-## 一、为什么选这个方案
+## 一、方案概述
+
+本方案在单隧道的基础上升级为 **Argo 双隧道架构** 并内置 **Clash / Mihomo YAML 订阅服务器**。在维持超低内存与成本的同时，实现了节点的高度稳定与自动化切换。
 
 ### 与现有方案对比
 
-| 维度 | quick-deploy (直连) | 本方案 (Argo 隧道) | 完整 argosbx |
-|---|---|---|---|
-| **抗封能力** | ❌ Railway 域名特征明显 | ✅ 隐藏在 Cloudflare CDN 后 | ✅ 同等 |
-| **启动速度** | ⚡ 秒级 | ⚡ 秒级（cloudflared 预编译） | 🐢 慢（下载 Xray/sing-box） |
-| **运行内存** | ~40MB | ~70MB | ~200MB+ |
-| **月成本估算** | ~$3 | ~$3.5 | ~$6+ |
-| **节点地址** | 需手动改成 Railway 域名 | ✅ 自动生成可用链接 | 需手动改 |
-| **CDN 优选 IP** | ❌ | ✅ 支持 | ✅ 支持 |
-| **WARP 解锁** | ❌ | ❌ | ✅ |
-| **多协议** | VLESS-WS | VLESS-WS | 10+ |
+| 维度 | quick-deploy (直连) | 传统单 Argo 隧道 | **本方案 (Argo 双隧道)** | 完整 argosbx |
+|---|---|---|---|---|
+| **抗封能力** | ❌ Railway 域名特征明显 | ✅ 隐藏在 CF 后 | ✅ **双重防护 + 自动备用** | ✅ 同等 |
+| **高可用性** | ❌ 依赖单域名 | ⚠️ 依赖固定或临时单隧道 | ⚡ **固定 + 临时双隧道并发** | ⚠️ 依赖单隧道 |
+| **Clash 订阅** | ❌ | ❌ | ✅ **内置 Clash/Mihomo 自动回退订阅** | ❌ 需额外转换 |
+| **启动速度** | ⚡ 秒级 | ⚡ 秒级 | ⚡ **秒级（ cloudflared 预编译）** | 🐢 慢 |
+| **运行内存** | ~40MB | ~70MB | **~100MB** | ~200MB+ |
+| **月成本估算** | ~$3 | ~$3.5 | **~$1.40 ~ $3.50** | ~$6+ |
+| **CDN 优选 IP** | ❌ | ✅ 支持 | ✅ **双节点同时支持优选 IP** | ✅ 支持 |
 
-**结论：** 在 Railway 上跑节点，Argo 隧道 + 纯 Node.js 是**抗封能力与成本的最优平衡点**。
-
-### 架构图
+### 架构图（3 进程布局）
 
 ```
-                                    ┌──────────────────────────┐
-                                    │     Railway 容器          │
-客户端                Cloudflare    │                          │
-┌─────┐  443/TLS   ┌─────────┐    │ ┌────────────┐ ┌──────┐  │     ┌──────┐
-│     │───────────→│  CDN    │    │ │cloudflared │→│Node.js│──────→│目标  │
-│     │←───────────│  边缘   │    │ │(Argo 隧道) │ │VLESS  │  │     │站点  │
-└─────┘            └─────────┘    │ └────────────┘ └──────┘  │     └──────┘
-                        ↑         │       ↑                   │
-                   用户只看到      │  主动出站连接              │
-                   CF 的 IP        │  (不需要暴露入站端口)      │
-                                   └──────────────────────────┘
+                                      ┌────────────────────────────────────────────────────────┐
+                                      │                     Railway 容器                        │
+                                      │                                                        │
+客户端                                │   ┌─────────────────┐    ┌──────────────────────────┐  │     ┌──────┐
+┌───────────┐  Cloudflare CDN         │   │  cloudflared    │───→│                          │  │     │      │
+│Clash Verge│ ┌───────────────┐ 443/TLS│   │(固定隧道进程)   │    │                          │  │     │      │
+│ / Mihomo  │─┼─► ARGO_DOMAIN │───────┼───► └─────────────────┘    │                          │──┼────►│目标  │
+│           │ │               │       │                        │ Node.js 服务 (PORT)       │  │     │站点  │
+│(Auto-     │ │               │ 443/TLS│   ┌─────────────────┐    │ - VLESS-WS 代理协议      │  │     │      │
+│ Fallback) │─┼─► trycloudflare│───────┼───► cloudflared     │───→│ - Web 节点提取页面       │──┼────►│      │
+└───────────┘ └───────────────┘       │   │(临时隧道进程)   │    │ - Clash YAML 订阅生成器  │  │     └──────┘
+                                      │   └─────────────────┘    └──────────────────────────┘  │
+                                      │            ↑                           ↑               │
+                                      │     双隧道主动出站连接             HTTP / WebSocket     │
+                                      └────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -54,221 +57,212 @@
 | 出站流量 | $0.10/GB | 每月含 100GB 免费 |
 | 磁盘 | $0.000231/GB/分钟 | 含 1GB 免费 |
 
-### 本方案资源占用
+### 本方案资源占用（3 进程）
 
-| 组件 | CPU | 内存 | 说明 |
-|---|---|---|---|
-| Node.js VLESS-WS | ~0.01 vCPU (空闲) | ~40MB | 纯 JS，无内核 |
-| cloudflared | ~0.01 vCPU (空闲) | ~30MB | 维持隧道长连接 |
-| **合计（空闲）** | **~0.02 vCPU** | **~70MB** | |
-| **合计（活跃传输）** | ~0.1 vCPU | ~80MB | 取决于并发 |
+| 组件 | 进程数 | CPU | 内存 | 说明 |
+|---|---|---|---|---|
+| Node.js VLESS + Web/Sub | 1 | ~0.01 vCPU (空闲) | ~40MB | 纯 JS，处理代理及订阅 |
+| cloudflared (临时隧道) | 1 | ~0.01 vCPU (空闲) | ~30MB | 始终启动（保底备用） |
+| cloudflared (固定隧道) | 1 (可选) | ~0.01 vCPU (空闲) | ~30MB | 配置 Token 后启动 |
+| **合计（双隧道空闲）** | **3 进程** | **~0.03 vCPU** | **~100MB** | **超低资源消耗** |
+| **合计（单临时隧道空闲）**| **2 进程** | **~0.02 vCPU** | **~70MB** | 未配置 Token 时 |
 
 ### 月成本估算（24×7 运行）
 
 | 场景 | vCPU 费 | 内存费 | 合计 |
 |---|---|---|---|
-| **空闲待命** | $0.02 × $0.000463 × 43200 ≈ $0.40 | 0.07 × $0.000231 × 43200 ≈ $0.70 | **~$1.10/月** |
-| **轻度使用** (4h/天) | ~$0.33 | ~$0.17 | **~$1.60/月** |
-| **中度使用** (有传输) | ~$2.00 | ~$1.00 | **~$3.50/月** |
-
-> **Trial 用户（$5 一次性额度）**：轻度使用约可撑 **3 个月**。
->
-> **Hobby 用户（$5/月 + 用量）**：月均 $5 + $1~3 = **$6~8/月**。
-
-### 成本优化措施（本方案已内置）
-
-1. ✅ **无 Xray/sing-box 二进制** → 省构建时间 + 运行内存
-2. ✅ **cloudflared 预编译进镜像** → 不用每次启动下载 60MB
-3. ✅ **Alpine 基础镜像** → 镜像小，拉取快，构建费低
-4. ✅ **npm install --production** → 不装开发依赖
-5. ✅ **健康检查保活** → 避免不必要的重启（重启 = 额外 CPU 消耗）
+| **双隧道空闲待命** | $0.03 × $0.000463 × 43200 ≈ $0.60 | 0.10 × $0.000231 × 43200 ≈ $1.00 | **~$1.60/月** |
+| **轻度使用** (4h/天) | ~$0.35 | ~$0.20 | **~$1.80/月** |
+| **中度使用** (有传输) | ~$2.00 | ~$1.20 | **~$3.50/月** |
 
 ---
 
-## 三、部署步骤
+## 三、隧道模式说明
 
-### 3.1 准备 GitHub 仓库
+本项目的隧道架构支持两种运行模式，由环境变量决定：
+
+| 模式 | 环境变量 | 说明 | 特点 |
+|---|---|---|---|
+| **仅临时隧道** | 只需设置 `uuid` | 只启动 1 个 cloudflared 进程，自动分配 `*.trycloudflare.com` | 免配置 Cloudflare 域名，适合快速试用（重启会变域名） |
+| **双隧道并行** *(推荐)* | 设置 `uuid` + `ARGO_TOKEN` + `ARGO_DOMAIN` | 同时启动固定隧道和临时隧道，生成两个节点 | **固定节点作主用，临时节点作备用**，配合 Clash 自动回退，域名失效秒切 |
+
+---
+
+## 四、部署步骤
+
+### 4.1 准备 GitHub 仓库
 
 ```bash
 # 进入 argo-tunnel 目录
 cd /home/san/railway_docker/argo-tunnel
 
 # 初始化 Git 仓库
-git init && git add . && git commit -m "railway argo vless-ws deploy"
+git init && git add . && git commit -m "railway argo dual-tunnel vless deploy"
 
-# 在 GitHub 新建一个空仓库（如 railway-argo-node），然后：
+# 在 GitHub 新建一个空仓库，然后推送：
 git remote add origin https://github.com/<你的用户名>/railway-argo-node.git
 git branch -M main
 git push -u origin main
 ```
 
-### 3.2 Railway 部署
+### 4.2 Railway 部署
 
 1. 登录 [Railway](https://railway.com/) → **New Project** → **Deploy from GitHub repo**
 2. 选择你刚推送的仓库
 3. Railway 自动识别 Dockerfile 并构建（首次约 2~3 分钟）
-4. 进入服务 **Settings → Networking → Generate Domain**，得到 `xxx.up.railway.app`
 
-### 3.3 设置环境变量
+### 4.3 设置环境变量
 
-进入服务 **Variables** 标签，添加：
+进入服务 **Variables** 标签：
 
-#### 最简配置（临时隧道）
-
-只需设一个变量即可运行：
+#### 模式一：仅临时隧道（最简配置）
 
 ```
 uuid=你自己生成的UUID
 ```
 
-> 临时隧道自动分配 `*.trycloudflare.com` 域名，**容器重启后域名会变**。适合临时试用。
-
-#### 推荐配置（固定隧道）
+#### 模式二：双隧道并行（推荐配置）
 
 ```
 uuid=你自己生成的UUID
 ARGO_TOKEN=eyJhIjoixxxx...
 ARGO_DOMAIN=your-proxy.example.com
-NAME=my-argo
+NAME=my-node
 ```
 
-> 固定隧道域名不变，长期稳定。获取 Token 方法见 [3.4 节](#34-获取-argo-固定隧道-token)。
+> **可选：CF 优选 IP**
+> ```
+> CF_IP=104.16.0.1
+> ```
+> 设置后，节点连接地址使用此优选 IP，SNI/Host 仍维持 Argo 域名。
 
-#### 可选：CF 优选 IP
-
-```
-CF_IP=104.16.0.1
-```
-
-设置后节点链接地址用此 IP（延迟更低），SNI/Host 仍为 Argo 域名。推荐优选 IP 段：`104.16.0.0/12`、`172.64.0.0/13`。
-
-### 3.4 获取 Argo 固定隧道 Token
+### 4.4 获取 Argo 固定隧道 Token（针对模式二）
 
 1. 登录 [Cloudflare Dashboard](https://dash.cloudflare.com/)
 2. 左侧 **Zero Trust** → **Networks** → **Tunnels**
 3. 点 **Create a tunnel** → 选 **Cloudflared** → 输入隧道名称
-4. 跳过安装步骤，复制显示的 **Token**（`eyJhIjoixxxx...`）→ 填入 `ARGO_TOKEN`
+4. 复制显示的 **Token**（`eyJhIjoixxxx...`）→ 填入 Railway 环境变量 `ARGO_TOKEN`
 5. 在 **Public Hostname** 添加：
    - Subdomain + Domain = 你想用的域名（如 `proxy.example.com`）
    - Service Type = `HTTP`
    - URL = `localhost:8080`
-6. 保存。把域名填入 `ARGO_DOMAIN`
-
-### 3.5 获取节点
-
-部署成功后，两种方式获取 VLESS 链接：
-
-- **查看部署日志**：启动完成后会打印完整的 `vless://` 链接
-- **浏览器访问**：`https://<Argo域名>/<你的UUID>`
-
-复制 `vless://` 链接到客户端导入即可。
+6. 保存后将该域名填入 Railway 环境变量 `ARGO_DOMAIN`
 
 ---
 
-## 四、环境变量汇总
+## 五、获取节点与订阅
+
+部署成功后，可通过以下方式使用节点：
+
+### 5.1 WEB 节点管理页面
+
+在浏览器打开：
+```text
+https://<Argo域名>/<你的UUID>
+```
+页面将展示：
+- 节点状态及固定/临时域名
+- `vless://` 一键导入链接
+- Clash / Mihomo 订阅链接
+- 二维码及复制功能
+
+### 5.2 订阅 Endpoint 列表
+
+| Endpoint | 类型 | 说明 |
+|---|---|---|
+| `GET /:uuid/clash` | **Clash / Mihomo YAML** | 返回符合 Mihomo / Clash 规范的完整 YAML 订阅 |
+| `GET /:uuid/vless` | **VLESS 订阅** | 返回 Base64 编码的 `vless://` 链接列表 |
+| `GET /:uuid/sub` | **通用订阅** | 返回 Base64 编码的通用节点订阅 |
+
+---
+
+## 六、Clash / Mihomo 订阅使用
+
+部署成功后，在 **Clash Verge Rev** / **Mihomo Party** / **Clash Nyanpasu** 中添加远程订阅：
+
+**订阅 URL：**
+```text
+https://<Argo域名>/<你的UUID>/clash
+```
+
+### 订阅自动配置特性
+
+1. **双节点导出（Argo-Fixed + Argo-Tmp）**：同时包含固定隧道节点与临时隧道节点。
+2. **Auto-Fallback 自动回退代理组**：
+   - 默认优先使用 **Argo-Fixed**（固定隧道）。
+   - 当固定隧道断连或域名失效时，秒级自动无缝回退至 **Argo-Tmp**（临时隧道）。
+3. **完整 DNS 配置**：内置 `fake-ip` 模式及国内 DNS 分流，防止 DNS 污染。
+4. **智能分流规则**：内置国内域名/IP 直连规则，境外流量走 VLESS 节点。
+
+---
+
+## 七、环境变量汇总
 
 | 变量 | 必填 | 默认值 | 说明 |
 |---|---|---|---|
-| `uuid` | ✅ 强烈建议 | 内置默认值（不安全） | 节点 UUID，**必须固定** |
-| `ARGO_TOKEN` | 固定隧道必填 | 空（用临时隧道） | Cloudflare Tunnel Token |
-| `ARGO_DOMAIN` | 固定隧道必填 | 空 | 固定隧道对应的域名 |
+| `uuid` | ✅ 必填 | 无 | 节点 UUID，**务必生成固定值** |
+| `ARGO_TOKEN` | 否（双隧道必填）| 空 | Cloudflare Zero Trust 隧道 Token |
+| `ARGO_DOMAIN` | 否（双隧道必填）| 空 | 固定隧道自定义域名 |
 | `NAME` | 否 | `argo` | 节点名称前缀 |
-| `CF_IP` | 否 | 空（用 Argo 域名） | Cloudflare 优选 IP |
-| `PORT` | ❌ 不要设 | Railway 自动注入 | 内部监听端口 |
+| `CF_IP` | 否 | 空 | Cloudflare 优选 IP（设置后作为节点 connection host） |
+| `PORT` | ❌ 不要手动设 | `8080` (Railway 注入)| 内部服务监听端口 |
 
 ---
 
-## 五、客户端配置
+## 八、客户端配置参考
 
-VLESS 链接已自带全部参数，直接导入最省事。如需手填：
+若不使用订阅功能，也可通过手填参数导入客户端：
 
 | 配置项 | 值 |
 |---|---|
 | 协议 | VLESS |
-| 地址 | Argo 域名 或 CF 优选 IP |
-| 端口 | 443 |
-| UUID | 你设的 `uuid` |
-| 加密 | none |
-| 传输协议 | ws |
-| 路径 | `/` |
-| Host | Argo 域名 |
-| TLS | tls |
+| 地址 (Address) | Argo 域名 或 CF 优选 IP |
+| 端口 (Port) | 443 |
+| 用户 ID (UUID) | 你设置的 `uuid` |
+| 加密方式 | none |
+| 传输协议 (Network) | ws |
+| 伪装路径 (Path) | `/` |
+| 伪装域名 (Host) | Argo 域名 |
+| 传输层安全 (TLS) | tls |
 | SNI | Argo 域名 |
-| 指纹 | chrome |
+| 客户端指纹 | chrome |
 
-推荐客户端：
+---
 
-| 平台 | 推荐 |
+## 九、工作原理
+
+### 流量链路
+
+```
+1. 客户端发起连接 → 访问 Argo 域名 / 优选 IP 的 443 端口 (TLS)
+2. 请求到达 Cloudflare CDN 边缘节点
+3. Cloudflare 通过 Argo 双隧道长连接转发至容器内对应的 cloudflared 进程
+4. cloudflared 将流量解密并转发至本地 Node.js 服务 (localhost:8080)
+5. Node.js VLESS 服务验证 UUID 并解包：
+   - 若为 Web / 订阅请求 (如 /<uuid>/clash)，返回对应的 Web 页面或 YAML 配置文件
+   - 若为 VLESS 代理流量，发起 TCP/UDP outbound 连接至目标站点
+```
+
+---
+
+## 十、常见问题
+
+| 现象 | 原因与解决方法 |
 |---|---|
-| Android | v2rayNG、NekoBox |
-| Windows | v2rayN |
-| iOS | Shadowrocket |
-| macOS | V2rayU、Clash Meta |
+| 日志显示 "Argo 域名未就绪" | cloudflared 建立隧道需要数秒时间，属于正常等待过程；若持续未就绪请检查 `ARGO_TOKEN` 是否有效。 |
+| 临时隧道域名每次重启都变 | 临时隧道特性如此。推荐配置 `ARGO_TOKEN` 与 `ARGO_DOMAIN` 开启双隧道模式，配合 Clash 订阅实现无感切换。 |
+| Clash 订阅无法更新 | 确认订阅 URL 格式是否正确：`https://<Argo域名>/<UUID>/clash`，并确保 UUID 与环境变量一致。 |
+| 节点连接失败 | 1) 检查客户端 UUID 拼写；2) 检查 TLS 是否开启，SNI 与 Host 是否填入对应的 Argo 域名。 |
+| Railway 容器休眠 | Railway 免费/Standard 计划特性；客户端发起请求后会快速唤醒容器。 |
 
 ---
 
-## 六、工作原理
+## 十一、限制与提示
 
-### 流量链路（6 步）
-
-```
-1. 客户端连接 Argo 域名:443 (TLS)
-2. DNS 解析到 Cloudflare IP → 请求到达 CF 边缘
-3. CF 边缘识别隧道映射 → 经 Argo 隧道发送给容器
-4. cloudflared 收到请求 → 转发到 localhost:8080
-5. Node.js 解析 VLESS 协议头 → net.connect 连接目标
-6. 数据双向流动：目标 ↔ Node.js ↔ cloudflared ↔ CF ↔ 客户端
-```
-
-### 为什么比直连更好
-
-| | 直连 Railway | Argo 隧道 |
-|---|---|---|
-| 入口 | `xxx.up.railway.app`（特征明显） | Cloudflare CDN IP（全球分布） |
-| 抗封 | Railway 域名/IP 被封即失效 | 封不了 Cloudflare 整个 IP 段 |
-| 端口 | 需要 Railway 暴露端口 | 容器主动出站，无需暴露 |
-| 加速 | 无 | Cloudflare 全球 CDN + 智能路由 |
-| 成本 | 略低 | 略高（+cloudflared ~30MB RAM） |
-
----
-
-## 七、文件说明
-
-```
-argo-tunnel/
-├── Dockerfile        # Alpine 镜像 + 预编译 cloudflared
-├── start.sh          # 启动编排：Node.js + cloudflared
-├── index.js          # VLESS-WS 服务端（HTTP + WebSocket + VLESS 协议）
-├── package.json      # Node 依赖（仅 ws）
-├── railway.json      # Railway 部署配置（Dockerfile 构建器）
-├── .env.example      # 环境变量说明
-├── .gitignore        # Git 忽略规则
-└── .dockerignore     # Docker 构建忽略（减小构建上下文）
-```
-
----
-
-## 八、常见问题
-
-| 现象 | 解决 |
-|---|---|
-| 日志显示"Argo 域名未就绪" | cloudflared 连接 CF 需要几秒；若持续失败检查网络 |
-| 临时隧道域名变了 | 正常，容器重启会换域名；用固定隧道避免 |
-| 节点连不上 | 1) 检查 UUID 是否一致 2) 客户端 TLS 是否开启 3) SNI/Host 是否填 Argo 域名 |
-| Railway 容器休眠 | 免费版特性；首次连接会唤醒（~5-10 秒延迟） |
-| 想要 WARP 解锁流媒体 | 本方案不含 WARP；需要的话用完整 argosbx 镜像 |
-| 构建失败 | 检查 Railway 是否支持 Dockerfile 构建；确认 cloudflared 下载链接可达 |
-
----
-
-## 九、限制与提示
-
-1. **免费额度有限**：Railway Trial $5 用完即停；Hobby $5/月起。
-2. **非 7×24（免费版）**：容器空闲会休眠，唤醒有延迟；Hobby 版可设 Always-on。
-3. **仅 VLESS-WS**：本方案为轻量化只做 VLESS-WS；需多协议用完整 argosbx。
-4. **无 WARP**：不含 WARP 出站，流媒体解锁依赖出口 IP。
-5. **临时隧道域名不固定**：重启会变；长期使用**必须用固定隧道**。
-6. **合规**：仅供学习网络协议与容器化部署，请遵守所在地区法律法规及 Railway/Cloudflare 服务条款。
+1. **资源额度**：请关注 Railway 账户月度额度使用情况。
+2. **仅 VLESS-WS**：本方案专注于轻量与极速，仅提供 VLESS-WS 协议支持。
+3. **无 WARP 解锁**：本节点出口流量直连目标站点，不含 WARP 链式代理；流媒体解锁取决于 Railway 节点出口 IP。
+4. **合规提示**：仅供网络技术学习研究与个人合法使用，请遵守相关法律法规及服务提供商条款。
 
 ---
 
@@ -279,7 +273,3 @@ argo-tunnel/
 - Railway 文档：https://docs.railway.com/
 - 同目录直连方案：[`../quick-deploy/`](../quick-deploy/)
 - 流程优化分析：[`../railway-flow-optimization.md`](../railway-flow-optimization.md)
-
----
-
-*基于 argosbx (V25.11.20) 架构精简，cloudflared 使用最新稳定版。Railway 平台政策可能变化，以官方最新说明为准。*
