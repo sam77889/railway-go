@@ -186,10 +186,13 @@ https://<Argo域名>/<你的UUID>/clash
 
 ### 订阅自动配置特性
 
-1. **双节点导出（Argo-Fixed + Argo-Tmp）**：同时包含固定隧道节点与临时隧道节点。
-2. **Auto-Fallback 自动回退代理组**：
-   - 默认优先使用 **Argo-Fixed**（固定隧道）。
+1. **隧道域名节点（Argo-Fixed + Argo-Tmp）**：进入 `Proxy-Select` / `Auto-Fallback` 主代理组。
+   - `Auto-Fallback` 默认优先使用 **Argo-Fixed**（固定隧道）。
    - 当固定隧道断连或域名失效时，秒级自动无缝回退至 **Argo-Tmp**（临时隧道）。
+2. **优选 IP 独立代理组 `cf-ip`**（配置了 `CF_IP` 或存在 `result.csv` 时生成）：
+   - 每个优选 IP 一个节点（`Argo-Fixed-1..N` / `Argo-Tmp-1..N`）。
+   - 采用 `url-test` 自动测速，始终选用延迟最低的 IP。
+   - **不进入** `Proxy-Select` / `Auto-Fallback`，需要时在客户端手动切换到 `cf-ip` 组使用。
 3. **完整 DNS 配置**：内置 `fake-ip` 模式及国内 DNS 分流，防止 DNS 污染。
 4. **智能分流规则**：内置国内域名/IP 直连规则，境外流量走 VLESS 节点。
 

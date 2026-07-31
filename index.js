@@ -45,10 +45,15 @@ function getAllVlessLinks() {
     const links = [];
     const fixed = getFixedDomain();
     const tmp = getTmpDomain();
-    const addrs = CF_IPS.length > 0 ? CF_IPS : [null];
-    const multi = CF_IPS.length > 1;
-    if (fixed) addrs.forEach((a, i) => links.push(buildVlessLink(fixed, multi ? `fixed-${i + 1}` : 'fixed', a)));
-    if (tmp) addrs.forEach((a, i) => links.push(buildVlessLink(tmp, multi ? `tmp-${i + 1}` : 'tmp', a)));
+    // 始终保留隧道域名节点，优选 IP 节点追加在后
+    if (fixed) {
+        links.push(buildVlessLink(fixed, 'fixed', null));
+        CF_IPS.forEach((a, i) => links.push(buildVlessLink(fixed, `fixed-${i + 1}`, a)));
+    }
+    if (tmp) {
+        links.push(buildVlessLink(tmp, 'tmp', null));
+        CF_IPS.forEach((a, i) => links.push(buildVlessLink(tmp, `tmp-${i + 1}`, a)));
+    }
     return links;
 }
 
@@ -77,30 +82,36 @@ function buildClashYaml() {
     const fixed = getFixedDomain();
     const tmp = getTmpDomain();
     const proxies = [];
-    const proxyNames = [];
-
-    const addrs = CF_IPS.length > 0 ? CF_IPS : [null];
-    const multi = CF_IPS.length > 1;
+    const domainNames = []; // 隧道域名节点：进 Proxy-Select / Auto-Fallback
+    const cfIpNames = [];   // 优选 IP 节点：仅进独立代理组 cf-ip
 
     if (fixed) {
-        addrs.forEach((a, i) => {
-            const name = multi ? `Argo-Fixed-${i + 1}` : 'Argo-Fixed';
+        proxies.push(buildClashProxy('Argo-Fixed', fixed, null));
+        domainNames.push('Argo-Fixed');
+        CF_IPS.forEach((a, i) => {
+            const name = `Argo-Fixed-${i + 1}`;
             proxies.push(buildClashProxy(name, fixed, a));
-            proxyNames.push(name);
+            cfIpNames.push(name);
         });
     }
     if (tmp) {
-        addrs.forEach((a, i) => {
-            const name = multi ? `Argo-Tmp-${i + 1}` : 'Argo-Tmp';
+        proxies.push(buildClashProxy('Argo-Tmp', tmp, null));
+        domainNames.push('Argo-Tmp');
+        CF_IPS.forEach((a, i) => {
+            const name = `Argo-Tmp-${i + 1}`;
             proxies.push(buildClashProxy(name, tmp, a));
-            proxyNames.push(name);
+            cfIpNames.push(name);
         });
     }
 
-    if (proxyNames.length === 0) return null;
+    if (proxies.length === 0) return null;
 
-    const proxyList = proxyNames.map(n => `      - ${n}`).join('\n');
-    const selectList = ['Auto-Fallback', ...proxyNames].map(n => `      - ${n}`).join('\n');
+    const proxyList = domainNames.map(n => `      - ${n}`).join('\n');
+    const selectList = ['Auto-Fallback', ...domainNames].map(n => `      - ${n}`).join('\n');
+    // 优选 IP 独立代理组：url-test 自动选择延迟最低节点，不进 Proxy-Select / Auto-Fallback
+    const cfIpGroup = cfIpNames.length > 0
+        ? `\n\n  - name: cf-ip\n    type: url-test\n    url: https://www.gstatic.com/generate_204\n    interval: 300\n    tolerance: 50\n    lazy: false\n    proxies:\n${cfIpNames.map(n => `      - ${n}`).join('\n')}`
+        : '';
 
     return `# Railway Argo VLESS-WS 双隧道 — Clash Meta / Mihomo 配置
 # 自动生成，请勿手动编辑
@@ -189,7 +200,7 @@ ${selectList}
     max-failed-times: 2
     lazy: false
     proxies:
-${proxyList}
+${proxyList}${cfIpGroup}
 
 rules:
   - PROCESS-NAME,cloudflared,DIRECT

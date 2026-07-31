@@ -153,25 +153,19 @@ echo "║   ✅ 部署成功                                ║"
 echo "╚══════════════════════════════════════════════╝"
 echo ""
 
-# 输出节点链接：$1=隧道域名 $2=标签(fixed/tmp)，CF_IP 为逗号分隔多值时每个 IP 输出一条
+# 输出节点链接：$1=隧道域名 $2=标签(fixed/tmp)；先输出域名节点，再为每个优选 IP 输出一条
 print_links() {
     PL_DOMAIN="$1"
     PL_TAG="$2"
+    echo "  链接: vless://${UUID}@${PL_DOMAIN}:443?encryption=none&security=tls&sni=${PL_DOMAIN}&fp=chrome&type=ws&host=${PL_DOMAIN}&path=%2F#Vl-${PL_TAG}-${NODE_NAME}"
     if [ -n "$CF_IP" ]; then
-        PL_COUNT=$(echo "$CF_IP" | tr ',' '\n' | grep -c .)
         PL_IDX=0
         echo "$CF_IP" | tr ',' '\n' | while read -r PL_IP; do
             PL_IP=$(echo "$PL_IP" | tr -d ' ')
             [ -z "$PL_IP" ] && continue
             PL_IDX=$((PL_IDX + 1))
-            if [ "$PL_COUNT" -gt 1 ]; then
-                echo "  链接: vless://${UUID}@${PL_IP}:443?encryption=none&security=tls&sni=${PL_DOMAIN}&fp=chrome&type=ws&host=${PL_DOMAIN}&path=%2F#Vl-${PL_TAG}-${PL_IDX}-${NODE_NAME}"
-            else
-                echo "  链接: vless://${UUID}@${PL_IP}:443?encryption=none&security=tls&sni=${PL_DOMAIN}&fp=chrome&type=ws&host=${PL_DOMAIN}&path=%2F#Vl-${PL_TAG}-${NODE_NAME}"
-            fi
+            echo "  链接: vless://${UUID}@${PL_IP}:443?encryption=none&security=tls&sni=${PL_DOMAIN}&fp=chrome&type=ws&host=${PL_DOMAIN}&path=%2F#Vl-${PL_TAG}-${PL_IDX}-${NODE_NAME}"
         done
-    else
-        echo "  链接: vless://${UUID}@${PL_DOMAIN}:443?encryption=none&security=tls&sni=${PL_DOMAIN}&fp=chrome&type=ws&host=${PL_DOMAIN}&path=%2F#Vl-${PL_TAG}-${NODE_NAME}"
     fi
 }
 
