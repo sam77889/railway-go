@@ -1,5 +1,7 @@
 # Railway Argo VLESS-WS 双隧道轻量节点
 
+[![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/new)
+
 > **Cloudflare Argo 双隧道（固定 + 临时并行） + 纯 Node.js VLESS-WS + Clash / Mihomo 订阅 — Railway 上极高可用与超低成本的抗封节点方案**
 >
 > 流量链路：`客户端 → Cloudflare CDN (443/TLS) → Argo 双隧道 → cloudflared → Node.js VLESS-WS / 订阅服务 → 目标站点`
@@ -107,33 +109,32 @@ git push -u origin main
 
 ### 4.2 Railway 部署
 
+如果你已经将仓库设为 Public（公开），你可以直接点击上方或者下方的**一键部署按钮**：
+
+[![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/new)
+
+或者手动部署：
 1. 登录 [Railway](https://railway.com/) → **New Project** → **Deploy from GitHub repo**
-2. 选择你刚推送的仓库
-3. Railway 自动识别 Dockerfile 并构建（首次约 2~3 分钟）
+2. 选择你刚推送的仓库。
+3. Railway 自动识别 Dockerfile 并构建（首次约 2~3 分钟）。
 
-### 4.3 设置环境变量
+### 4.3 设置环境变量向导
 
-进入服务 **Variables** 标签：
+本项目已配置 `template.json` 自动向导，如果您通过模板部署或在 Railway 面板的 **Variables** 标签页中，您会看到如下的配置提示：
 
 #### 模式一：仅临时隧道（最简配置）
 
-```
-uuid=你自己生成的UUID
-```
+* `uuid`：系统已自动为您生成了一个 UUID。如果不使用双隧道，只需保留此 UUID 即可直接部署运行。
 
 #### 模式二：双隧道并行（推荐配置）
 
-```
-uuid=你自己生成的UUID
-ARGO_TOKEN=eyJhIjoixxxx...
-ARGO_DOMAIN=your-proxy.example.com
-NAME=my-node
-```
+* `uuid`：保留系统生成的 UUID 或填入你自己的固定 UUID。
+* `ARGO_TOKEN`：填入你从 Cloudflare 获取的隧道 Token（`eyJhIjoixxxx...`）。
+* `ARGO_DOMAIN`：填入绑定的自定义域名（如 `your-proxy.example.com`）。
+* `NAME`：自定义节点名称前缀。
 
 > **可选：CF 优选 IP**
-> ```
-> CF_IP=104.16.0.1
-> ```
+> 配置 `CF_IP` 变量即可（如 `CF_IP=104.16.0.1`）。
 > 设置后，节点连接地址使用此优选 IP，SNI/Host 仍维持 Argo 域名。
 
 ### 4.4 获取 Argo 固定隧道 Token（针对模式二）

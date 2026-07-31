@@ -15,8 +15,25 @@
 PORT=${PORT:-8080}
 UUID=${uuid:-79411d85-b0dc-4cd2-b46c-01789a18c650}
 NODE_NAME=${NAME:-argo}
-ARGO_DOMAIN=${ARGO_DOMAIN:-}
-ARGO_TOKEN=${ARGO_TOKEN:-}
+RAW_DOMAIN=${ARGO_DOMAIN:-}
+RAW_TOKEN=${ARGO_TOKEN:-}
+
+# 1. 域名净化：去前缀去后缀
+CLEAN_DOMAIN=$(echo "$RAW_DOMAIN" | sed -E 's|^https?://||' | sed -E 's|/+$||')
+
+# 2. Token 智能提取：自动寻找 eyJh 开头的 base64 字符串
+CLEAN_TOKEN=$(echo "$RAW_TOKEN" | grep -oE 'eyJh[a-zA-Z0-9=_-]+' | head -n1)
+
+# 3. 单变量拆分：如果没单独填域名，尝试从 RAW_TOKEN 中提取剩余内容作为域名
+if [ -z "$CLEAN_DOMAIN" ] && [ -n "$CLEAN_TOKEN" ]; then
+    POSSIBLE_DOMAIN=$(echo "$RAW_TOKEN" | sed -E "s|${CLEAN_TOKEN}||g" | sed -E "s|cloudflared(\.exe)?\s+service\s+install||gi" | tr -d ' ,|')
+    if [ -n "$POSSIBLE_DOMAIN" ]; then
+        CLEAN_DOMAIN=$(echo "$POSSIBLE_DOMAIN" | sed -E 's|^https?://||' | sed -E 's|/+$||')
+    fi
+fi
+
+ARGO_DOMAIN="$CLEAN_DOMAIN"
+ARGO_TOKEN="$CLEAN_TOKEN"
 CF_IP=${CF_IP:-}
 
 echo ""
@@ -40,9 +57,9 @@ if ! kill -0 "$NODE_PID" 2>/dev/null; then
 fi
 echo "[✓] Node.js VLESS-WS 服务已启动 (PID: ${NODE_PID})"
 
-# ── 2. 启动固定隧道（如设 ARGO_TOKEN）──
+# ── 2. 启动固定隧道（如设 ARGO_TOKEN 且解析出 ARGO_DOMAIN）──
 CF_FIXED_PID=""
-if [ -n "$ARGO_TOKEN" ]; then
+if [ -n "$ARGO_TOKEN" ] && [ -n "$ARGO_DOMAIN" ]; then
     echo ""
     echo "┌─ 固定隧道 ────────────────────────────────┐"
     echo "│  域名: ${ARGO_DOMAIN}"
