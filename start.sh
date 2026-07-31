@@ -65,21 +65,31 @@ if [ -n "$ARGO_TOKEN" ] && [ -n "$ARGO_DOMAIN" ]; then
     echo "│  域名: ${ARGO_DOMAIN}"
     echo "└────────────────────────────────────────────┘"
 
-    if [ -n "$ARGO_DOMAIN" ]; then
-        echo "$ARGO_DOMAIN" > /tmp/argo_domain_fixed
+    echo "$ARGO_DOMAIN" > /tmp/argo_domain_fixed
+
+    # Token 格式预检：合法 Token 是 base64url 编码的 JSON（应含 a/t/s 三个字段）
+    TOKEN_CHECK=$(node -e "try{const j=JSON.parse(Buffer.from(process.argv[1].replace(/-/g,'+').replace(/_/g,'/'),'base64').toString());console.log(j.a&&j.t&&j.s?'OK':'字段缺失')}catch(e){console.log('无法解析')}" "$ARGO_TOKEN")
+    if [ "$TOKEN_CHECK" != "OK" ]; then
+        echo "[!] 警告：ARGO_TOKEN 格式异常（${TOKEN_CHECK}），可能复制不完整或隧道已重建"
     fi
 
-    cloudflared tunnel run \
-        --token "$ARGO_TOKEN" \
+    # 注意：--no-autoupdate 是 tunnel 命令级选项，必须放在 run 子命令之前
+    cloudflared tunnel \
         --no-autoupdate \
+        run \
+        --token "$ARGO_TOKEN" \
         > /tmp/argo_fixed.log 2>&1 &
     CF_FIXED_PID=$!
 
-    sleep 2
+    sleep 5
     if kill -0 "$CF_FIXED_PID" 2>/dev/null; then
         echo "[✓] 固定隧道已启动 (PID: ${CF_FIXED_PID})"
     else
-        echo "[!] 固定隧道启动失败，查看 /tmp/argo_fixed.log"
+        echo "[✗] 固定隧道启动失败，cloudflared 错误详情："
+        echo "────────────────────────────────────────────"
+        tail -n 20 /tmp/argo_fixed.log 2>/dev/null
+        echo "────────────────────────────────────────────"
+        echo "[i] 常见原因：Token 无效 / 隧道被删除或重建 / Token 复制不完整"
         CF_FIXED_PID=""
     fi
 else
@@ -115,8 +125,10 @@ if [ -n "$TMP_DOMAIN" ]; then
     echo "[✓] 临时隧道已启动 (PID: ${CF_TMP_PID})"
     echo "    域名: ${TMP_DOMAIN}"
 else
-    echo "[!] 30 秒内未获取到临时隧道域名"
-    echo "    查看日志: cat /tmp/argo_tmp.log"
+    echo "[!] 30 秒内未获取到临时隧道域名，cloudflared 错误详情："
+    echo "────────────────────────────────────────────"
+    tail -n 20 /tmp/argo_tmp.log 2>/dev/null
+    echo "────────────────────────────────────────────"
 fi
 
 # ── 4. 输出节点信息 ──
@@ -165,11 +177,13 @@ while true; do
         exit 1
     fi
     if [ -n "$CF_FIXED_PID" ] && ! kill -0 "$CF_FIXED_PID" 2>/dev/null; then
-        echo "[!] 固定隧道进程退出（降级为临时隧道）"
+        echo "[!] 固定隧道进程退出（降级为临时隧道），退出前日志："
+        tail -n 10 /tmp/argo_fixed.log 2>/dev/null
         CF_FIXED_PID=""
     fi
     if [ -n "$CF_TMP_PID" ] && ! kill -0 "$CF_TMP_PID" 2>/dev/null; then
-        echo "[!] 临时隧道进程退出（降级为固定隧道）"
+        echo "[!] 临时隧道进程退出（降级为固定隧道），退出前日志："
+        tail -n 10 /tmp/argo_tmp.log 2>/dev/null
         CF_TMP_PID=""
     fi
     sleep 30
