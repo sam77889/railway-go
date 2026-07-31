@@ -71,6 +71,9 @@
 # 进入项目目录
 cd /home/san/railway_docker/argo-tunnel
 
+# 初始化 Git 仓库（如果该目录还不是 git 仓库；已初始化过则跳过报错无碍）
+git init
+
 # 提交所有文件
 git add .
 git commit -m "feat: railway argo dual-tunnel vless deploy"
@@ -102,6 +105,10 @@ git push -u origin main
    - 在 GitHub 页面中选择 **Only select repositories** → 勾选你刚创建的仓库 → 点击 **Install & Authorize**。
 5. 回到 Railway 页面后，在仓库列表中**点击你的仓库名称**。
 6. Railway 会立即开始构建和部署。
+
+> **💡 重要：本项目不需要配置 Railway 域名和端口**
+>
+> 与网上其它教程（云桌面/Xray 手动部署类）不同，本方案的流量通过 cloudflared **出站隧道**转发，完全不依赖 Railway 的入站域名。请**不要**在 Settings → Networking 中 Generate Domain 或修改端口——保持默认即可，画蛇添足反而可能导致固定隧道端口失配。
 
 ### 4.2 观察构建过程
 
