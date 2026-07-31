@@ -294,5 +294,3 @@ https://<Cloudflare Tunnel域名>/<你的UUID>/clash
 
 - Cloudflare Tunnel 文档：https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/
 - Railway 文档：https://docs.railway.com/
-- 同目录直连方案：[`../quick-deploy/`](../quick-deploy/)
-- 流程优化分析：[`../railway-flow-optimization.md`](../railway-flow-optimization.md)
