@@ -1,20 +1,17 @@
 #!/bin/sh
 # ============================================================
-# Railway Argo VLESS-WS 启动脚本
-# 
-# 职责：
-# 1. 启动 Node.js VLESS-WS 服务（监听 PORT）
-# 2. 启动 cloudflared Argo 隧道（指向 localhost:PORT）
-# 3. 解析隧道域名，生成 VLESS 节点链接
+# Railway Argo VLESS-WS 启动脚本（双隧道版）
 #
-# 支持两种模式：
-# - 临时隧道：不设 ARGO_TOKEN，自动分配 *.trycloudflare.com
-# - 固定隧道：设 ARGO_TOKEN + ARGO_DOMAIN
+# 进程模型：
+#   1. Node.js VLESS-WS 服务（localhost:PORT）
+#   2. cloudflared ①：固定隧道（如设 ARGO_TOKEN）
+#   3. cloudflared ②：临时隧道（始终启动）
+#
+# 域名文件：
+#   /tmp/argo_domain_fixed — 固定隧道域名（来自 ARGO_DOMAIN 环境变量）
+#   /tmp/argo_domain_tmp   — 临时隧道域名（从 cloudflared 日志解析）
 # ============================================================
 
-set -e
-
-# === 读取配置 ===
 PORT=${PORT:-8080}
 UUID=${uuid:-79411d85-b0dc-4cd2-b46c-01789a18c650}
 NODE_NAME=${NAME:-argo}
@@ -24,7 +21,7 @@ CF_IP=${CF_IP:-}
 
 echo ""
 echo "╔══════════════════════════════════════════════╗"
-echo "║   Railway Argo VLESS-WS 轻量节点            ║"
+echo "║   Railway Argo VLESS-WS 轻量节点（双隧道）   ║"
 echo "╚══════════════════════════════════════════════╝"
 echo ""
 echo "  UUID:     ${UUID}"
@@ -32,7 +29,7 @@ echo "  端口:     ${PORT}"
 echo "  节点名:   ${NODE_NAME}"
 echo ""
 
-# === 1. 启动 Node.js VLESS-WS 服务 ===
+# ── 1. 启动 Node.js VLESS-WS 服务 ──
 node index.js &
 NODE_PID=$!
 sleep 1
@@ -43,106 +40,118 @@ if ! kill -0 "$NODE_PID" 2>/dev/null; then
 fi
 echo "[✓] Node.js VLESS-WS 服务已启动 (PID: ${NODE_PID})"
 
-# === 2. 启动 Argo 隧道 ===
+# ── 2. 启动固定隧道（如设 ARGO_TOKEN）──
+CF_FIXED_PID=""
 if [ -n "$ARGO_TOKEN" ]; then
-    # ── 固定隧道模式 ──
     echo ""
-    echo "┌─ 模式: Argo 固定隧道 ─────────────────────┐"
+    echo "┌─ 固定隧道 ────────────────────────────────┐"
     echo "│  域名: ${ARGO_DOMAIN}"
     echo "└────────────────────────────────────────────┘"
+
+    echo "$ARGO_DOMAIN" > /tmp/argo_domain_fixed
 
     cloudflared tunnel run \
         --token "$ARGO_TOKEN" \
         --no-autoupdate \
-        > /tmp/argo.log 2>&1 &
-    CF_PID=$!
+        > /tmp/argo_fixed.log 2>&1 &
+    CF_FIXED_PID=$!
 
-    # 写入域名供 index.js 读取
-    echo "$ARGO_DOMAIN" > /tmp/argo_domain
-
-else
-    # ── 临时隧道模式 ──
-    echo ""
-    echo "┌─ 模式: Argo 临时隧道 ─────────────────────┐"
-    echo "│  等待 cloudflared 分配域名...              │"
-    echo "└────────────────────────────────────────────┘"
-
-    cloudflared tunnel \
-        --url "http://localhost:${PORT}" \
-        --no-autoupdate \
-        > /tmp/argo.log 2>&1 &
-    CF_PID=$!
-
-    # 等待并解析临时隧道域名（最多等 30 秒）
-    ARGO_DOMAIN=""
-    i=0
-    while [ $i -lt 30 ]; do
-        ARGO_DOMAIN=$(grep -oE 'https://[a-zA-Z0-9_-]+\.trycloudflare\.com' /tmp/argo.log 2>/dev/null | head -1 | sed 's|https://||')
-        if [ -n "$ARGO_DOMAIN" ]; then
-            break
-        fi
-        sleep 1
-        i=$((i + 1))
-    done
-
-    if [ -z "$ARGO_DOMAIN" ]; then
-        echo ""
-        echo "[!] 30 秒内未获取到 Argo 隧道域名"
-        echo "    可能原因：网络连接问题 / cloudflared 启动失败"
-        echo "    查看日志：cat /tmp/argo.log"
-        echo ""
-        # 即使没拿到域名，也继续运行（健康检查保持容器存活）
+    sleep 2
+    if kill -0 "$CF_FIXED_PID" 2>/dev/null; then
+        echo "[✓] 固定隧道已启动 (PID: ${CF_FIXED_PID})"
     else
-        echo "$ARGO_DOMAIN" > /tmp/argo_domain
+        echo "[!] 固定隧道启动失败，查看 /tmp/argo_fixed.log"
+        CF_FIXED_PID=""
     fi
-fi
-
-# 检查 cloudflared 是否存活
-sleep 2
-if ! kill -0 "$CF_PID" 2>/dev/null; then
-    echo "[!] cloudflared 进程异常退出，查看日志："
-    cat /tmp/argo.log 2>/dev/null
-    echo ""
-    echo "Node.js 服务仍在运行（可通过 Railway 域名直连）"
-fi
-
-# === 3. 输出节点信息 ===
-echo ""
-if [ -n "$ARGO_DOMAIN" ]; then
-    # 连接地址：优先用 CF 优选 IP，否则用 Argo 域名
-    CONNECT_ADDR=${CF_IP:-$ARGO_DOMAIN}
-
-    VLESS_LINK="vless://${UUID}@${CONNECT_ADDR}:443?encryption=none&security=tls&sni=${ARGO_DOMAIN}&fp=chrome&type=ws&host=${ARGO_DOMAIN}&path=%2F#Vl-${NODE_NAME}"
-
-    echo "╔══════════════════════════════════════════════╗"
-    echo "║   ✅ 部署成功                                ║"
-    echo "╚══════════════════════════════════════════════╝"
-    echo ""
-    echo "  Argo 域名:  ${ARGO_DOMAIN}"
-    if [ -n "$CF_IP" ]; then
-        echo "  CF 优选IP:  ${CF_IP}"
-    fi
-    echo ""
-    echo "  ── VLESS 节点链接（复制到客户端导入）──"
-    echo ""
-    echo "  ${VLESS_LINK}"
-    echo ""
-    echo "  ── 订阅/节点页 ──"
-    echo ""
-    echo "  https://${ARGO_DOMAIN}/${UUID}"
-    echo ""
-    echo "══════════════════════════════════════════════"
 else
-    echo "╔══════════════════════════════════════════════╗"
-    echo "║   ⚠️  Argo 域名未就绪                       ║"
-    echo "╚══════════════════════════════════════════════╝"
-    echo ""
-    echo "  Node.js 服务正常运行中"
-    echo "  等待 cloudflared 重连..."
-    echo "  查看日志：cat /tmp/argo.log"
+    echo "[i] 未设 ARGO_TOKEN，跳过固定隧道"
+fi
+
+# ── 3. 启动临时隧道（始终启动）──
+echo ""
+echo "┌─ 临时隧道 ────────────────────────────────┐"
+echo "│  等待 cloudflared 分配域名...              │"
+echo "└────────────────────────────────────────────┘"
+
+cloudflared tunnel \
+    --url "http://localhost:${PORT}" \
+    --no-autoupdate \
+    > /tmp/argo_tmp.log 2>&1 &
+CF_TMP_PID=$!
+
+# 等待并解析临时隧道域名（最多 30 秒）
+TMP_DOMAIN=""
+i=0
+while [ $i -lt 30 ]; do
+    TMP_DOMAIN=$(grep -oE 'https://[a-zA-Z0-9_-]+\.trycloudflare\.com' /tmp/argo_tmp.log 2>/dev/null | head -1 | sed 's|https://||')
+    if [ -n "$TMP_DOMAIN" ]; then
+        break
+    fi
+    sleep 1
+    i=$((i + 1))
+done
+
+if [ -n "$TMP_DOMAIN" ]; then
+    echo "$TMP_DOMAIN" > /tmp/argo_domain_tmp
+    echo "[✓] 临时隧道已启动 (PID: ${CF_TMP_PID})"
+    echo "    域名: ${TMP_DOMAIN}"
+else
+    echo "[!] 30 秒内未获取到临时隧道域名"
+    echo "    查看日志: cat /tmp/argo_tmp.log"
+fi
+
+# ── 4. 输出节点信息 ──
+echo ""
+echo "╔══════════════════════════════════════════════╗"
+echo "║   ✅ 部署成功                                ║"
+echo "╚══════════════════════════════════════════════╝"
+echo ""
+
+# 固定隧道节点
+if [ -n "$ARGO_DOMAIN" ] && [ -n "$CF_FIXED_PID" ]; then
+    FIXED_ADDR=${CF_IP:-$ARGO_DOMAIN}
+    FIXED_LINK="vless://${UUID}@${FIXED_ADDR}:443?encryption=none&security=tls&sni=${ARGO_DOMAIN}&fp=chrome&type=ws&host=${ARGO_DOMAIN}&path=%2F#Vl-fixed-${NODE_NAME}"
+    echo "  ── 固定隧道 ──"
+    echo "  域名: ${ARGO_DOMAIN}"
+    echo "  链接: ${FIXED_LINK}"
     echo ""
 fi
 
-# === 4. 等待主进程 ===
-# 监控两个进程，任一退出则重启（依靠 Railway restartPolicy 重拉）
-wait $NODE_PID $CF_PID 2>/dev/null
+# 临时隧道节点
+if [ -n "$TMP_DOMAIN" ]; then
+    TMP_ADDR=${CF_IP:-$TMP_DOMAIN}
+    TMP_LINK="vless://${UUID}@${TMP_ADDR}:443?encryption=none&security=tls&sni=${TMP_DOMAIN}&fp=chrome&type=ws&host=${TMP_DOMAIN}&path=%2F#Vl-tmp-${NODE_NAME}"
+    echo "  ── 临时隧道 ──"
+    echo "  域名: ${TMP_DOMAIN}"
+    echo "  链接: ${TMP_LINK}"
+    echo ""
+fi
+
+# 订阅地址
+SUB_DOMAIN=${ARGO_DOMAIN:-$TMP_DOMAIN}
+if [ -n "$SUB_DOMAIN" ]; then
+    echo "  ── 订阅地址 ──"
+    echo "  vless 链接: https://${SUB_DOMAIN}/${UUID}"
+    echo "  Clash 配置: https://${SUB_DOMAIN}/${UUID}/clash"
+    echo ""
+fi
+echo "══════════════════════════════════════════════"
+
+# ── 5. 等待进程 ──
+# Node.js 是生命线：它退出则容器退出
+# cloudflared 退出只打告警（降级为单隧道）
+while true; do
+    if ! kill -0 "$NODE_PID" 2>/dev/null; then
+        echo "[✗] Node.js 进程退出，容器将重启"
+        exit 1
+    fi
+    if [ -n "$CF_FIXED_PID" ] && ! kill -0 "$CF_FIXED_PID" 2>/dev/null; then
+        echo "[!] 固定隧道进程退出（降级为临时隧道）"
+        CF_FIXED_PID=""
+    fi
+    if ! kill -0 "$CF_TMP_PID" 2>/dev/null; then
+        echo "[!] 临时隧道进程退出（降级为固定隧道）"
+        CF_TMP_PID=""
+    fi
+    sleep 30
+done
