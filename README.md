@@ -28,22 +28,44 @@
 
 ### 架构图（3 进程布局）
 
-```
-                                      ┌────────────────────────────────────────────────────────┐
-                                      │                     Railway 容器                        │
-                                      │                                                        │
-客户端                                │   ┌─────────────────┐    ┌──────────────────────────┐  │     ┌──────┐
-┌───────────┐  Cloudflare CDN         │   │  cloudflared    │───→│                          │  │     │      │
-│Clash Verge│ ┌───────────────┐ 443/TLS│   │(固定隧道进程)   │    │                          │  │     │      │
-│ / Mihomo  │─┼─► CLOUDFLARE_TUNNEL_DOMAIN │───────┼───► └─────────────────┘    │                          │──┼────►│目标  │
-│           │ │               │       │                        │ Node.js 服务 (PORT)       │  │     │站点  │
-│(Auto-     │ │               │ 443/TLS│   ┌─────────────────┐    │ - VLESS-WS 代理协议      │  │     │      │
-│ Fallback) │─┼─► trycloudflare│───────┼───► cloudflared     │───→│ - vless:// 节点链接输出  │──┼────►│      │
-└───────────┘ └───────────────┘       │   │(临时隧道进程)   │    │ - Clash YAML 订阅生成器  │  │     └──────┘
-                                      │   └─────────────────┘    └──────────────────────────┘  │
-                                      │            ↑                           ↑               │
-                                      │     双隧道主动出站连接             HTTP / WebSocket     │
-                                      └────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    Client(["🖥️ 客户端<br/>Clash Verge / Mihomo<br/>Auto-Fallback（秒级回退）"])
+
+    subgraph CDN["☁️ Cloudflare CDN 边缘"]
+        direction TB
+        FixedEntry["固定隧道入口<br/>自定义域名"]
+        TmpEntry["临时隧道入口<br/>*.trycloudflare.com"]
+    end
+
+    subgraph Rail["🚆 Railway 容器（3 进程）"]
+        direction TB
+        CFFixed["cloudflared<br/>（固定隧道进程）"]
+        CFTmp["cloudflared<br/>（临时隧道进程）"]
+        Node["Node.js 服务（PORT）<br/>· VLESS-WS 代理<br/>· 节点链接输出<br/>· Clash 订阅生成器"]
+        CFFixed -->|"③ localhost:8080<br/>HTTP / WebSocket"| Node
+        CFTmp -->|"③ localhost:8080<br/>HTTP / WebSocket"| Node
+    end
+
+    Target(["🌍 目标站点"])
+
+    Client -->|"① 443 / TLS"| FixedEntry
+    Client -->|"① 443 / TLS"| TmpEntry
+    FixedEntry -->|"② 双隧道长连接（cloudflared 主动出站）"| CFFixed
+    TmpEntry -->|"② 双隧道长连接（cloudflared 主动出站）"| CFTmp
+    Node -->|"④ TCP / UDP outbound"| Target
+
+    classDef client fill:#e0f2fe,stroke:#0284c7,stroke-width:2px,color:#0c4a6e
+    classDef cdn fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#78350f
+    classDef proc fill:#ede9fe,stroke:#7c3aed,stroke-width:2px,color:#4c1d95
+    classDef nodejs fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d
+    classDef target fill:#fee2e2,stroke:#dc2626,stroke-width:2px,color:#7f1d1d
+
+    class Client client
+    class FixedEntry,TmpEntry cdn
+    class CFFixed,CFTmp proc
+    class Node nodejs
+    class Target target
 ```
 
 ---
