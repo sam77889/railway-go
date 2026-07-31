@@ -274,7 +274,8 @@ const server = http.createServer((req, res) => {
         if (yaml) {
             res.writeHead(200, {
                 'Content-Type': 'text/yaml; charset=utf-8',
-                'Content-Disposition': 'attachment; filename="cloudflare_tunnel-clash.yaml"',
+                'Content-Disposition': 'attachment; filename="railway.yaml"',
+                'Profile-Title': 'railway',
                 'Profile-Update-Interval': '6',
             });
             res.end(yaml);
