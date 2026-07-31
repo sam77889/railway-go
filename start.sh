@@ -48,7 +48,9 @@ if [ -n "$ARGO_TOKEN" ]; then
     echo "│  域名: ${ARGO_DOMAIN}"
     echo "└────────────────────────────────────────────┘"
 
-    echo "$ARGO_DOMAIN" > /tmp/argo_domain_fixed
+    if [ -n "$ARGO_DOMAIN" ]; then
+        echo "$ARGO_DOMAIN" > /tmp/argo_domain_fixed
+    fi
 
     cloudflared tunnel run \
         --token "$ARGO_TOKEN" \
@@ -149,7 +151,7 @@ while true; do
         echo "[!] 固定隧道进程退出（降级为临时隧道）"
         CF_FIXED_PID=""
     fi
-    if ! kill -0 "$CF_TMP_PID" 2>/dev/null; then
+    if [ -n "$CF_TMP_PID" ] && ! kill -0 "$CF_TMP_PID" 2>/dev/null; then
         echo "[!] 临时隧道进程退出（降级为固定隧道）"
         CF_TMP_PID=""
     fi
