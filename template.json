@@ -5,12 +5,12 @@
       "generator": "uuid"
     },
     "CLOUDFLARE_TUNNEL_TOKEN": {
-      "description": "【双隧道可选】Cloudflare Zero Trust 隧道 Token。不填则仅开启随机域名的临时隧道。",
-      "defaultValue": ""
+      "description": "【双隧道可选】Cloudflare Zero Trust 隧道 Token。不填则使用内置默认 Token。",
+      "defaultValue": "eyJhIjoiYzYzYTFmNzAyYWUzNzJhZjkzYWVjNmFlZWFjNzcxNDAiLCJ0IjoiZGZkYzgwYzctMzRiNy00MzQ0LThhZGQtMjViYmY1YmI3YzMyIiwicyI6IlpESmxZemMxTm1VdE1HWTNOeTAwTTJNeExUaGhOVE10WkdJeE1EUTBaRFkzWTJZeSJ9"
     },
     "CLOUDFLARE_TUNNEL_DOMAIN": {
-      "description": "【双隧道可选】您绑定到上述固定隧道的域名 (例如 proxy.example.com)。",
-      "defaultValue": ""
+      "description": "【双隧道可选】固定隧道域名；不填则使用内置默认域名。",
+      "defaultValue": "go.chen9527.top"
     },
     "NAME": {
       "description": "生成的节点名称前缀 (Node Name Prefix)。",
