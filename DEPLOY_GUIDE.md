@@ -1,531 +1,82 @@
-# Railway Cloudflare Tunnel 双隧道节点 — 完整部署操作手册
+# VPS 部署与迁移
 
-> 本文档面向**从未使用过 Railway** 的用户，从零开始，一步一步带你完成部署。
->
-> 预计耗时：**15 ~ 25 分钟**（含 Cloudflare 隧道配置）
+## 1. 准备主机
 
----
+选择允许该用途、有公网 IP、可开放 TCP 443 的 Linux VPS。安装官方 Docker Engine、Compose v2 和 Node.js 22+。用实际运营商网络挑选线路，先验证一台，再考虑不同网络的备用节点。
 
-## 目录
+检查 443 占用和防火墙规则，按实际管理地址限制 SSH。Docker 发布端口可能经过独立防火墙链，不能只看 UFW 的显示结果；应从另一台主机验证真正暴露的端口。不要自动覆盖宿主已有网络规则。
 
-1. [前置准备](#一前置准备)
-2. [第一步：注册 Railway 账号](#二第一步注册-railway-账号)
-3. [第二步：将代码推送到 GitHub](#三第二步将代码推送到-github)
-4. [第三步：在 Railway 创建项目并部署](#四第三步在-railway-创建项目并部署)
-5. [第四步：设置环境变量](#五第四步设置环境变量)
-6. [第五步：获取 Cloudflare 固定隧道 Token（双隧道模式）](#六第五步获取-cloudflare-固定隧道-token双隧道模式)
-7. [第六步：确认部署成功](#七第六步确认部署成功)
-8. [第七步：获取节点链接 / Clash 订阅](#八第七步获取节点链接--clash-订阅)
-9. [日常维护操作](#九日常维护操作)
-10. [常见问题排查](#十常见问题排查)
+## 2. 确认 REALITY 目标站
 
----
+目标站是你选定的公共 TLS 主机，必须从 VPS 可达，支持 TLS 1.3 / HTTP/2。它与客户端连接的 VPS IP 是不同概念，不要求把任何域名解析到 VPS，也不用申请自己的 TLS 证书。
 
-## 一、前置准备
-
-在开始之前，请确认你已有以下账号和工具：
-
-| 项目 | 说明 | 获取方式 |
-|---|---|---|
-| **GitHub 账号** | 用于托管代码，Railway 从这里拉取部署 | https://github.com/signup |
-| **Railway 账号** | 部署运行服务的平台 | https://railway.com （用 GitHub 直接登录） |
-| **Cloudflare 账号** *(可选)* | 仅双隧道模式需要，用于创建固定隧道 | https://dash.cloudflare.com/sign-up |
-| **自有域名** *(可选)* | 仅双隧道模式需要，需已托管到 Cloudflare DNS | 任意域名注册商购买 |
-| **Git** | 本地推送代码用 | `sudo apt install git` 或 https://git-scm.com |
-
-> **💡 提示**：如果你只是想快速体验，**不需要** Cloudflare 和自有域名。只需 GitHub + Railway 即可一键部署"临时隧道模式"。
-
----
-
-## 二、第一步：注册 Railway 账号
-
-1. 打开 https://railway.com
-2. 点击右上角 **Login** → 选择 **Login with GitHub**。
-3. 在弹出的 GitHub 授权页面中，点击 **Authorize Railway**。
-4. 首次登录后，Railway 会要求你选择一个计划：
-   - **Trial（试用）**：免费，有 $5 额度，但**不绑卡会在 500 小时后停机**。
-   - **Hobby（个人）**：$5/月起步，**推荐**。绑定信用卡后按用量计费，本项目月费约 $1.6 ~ $3.5。
-5. 建议选择 **Hobby** 计划并绑定信用卡（支持 Visa/Mastercard，国内双币卡可用）。
-
-> **⚠️ 注意**：Trial 计划的 500 小时限制意味着大约 21 天后服务会被暂停。如果你打算长期使用，请升级到 Hobby。
-
----
-
-## 三、第二步：将代码推送到 GitHub
-
-### 3.1 在 GitHub 上创建空仓库
-
-1. 打开 https://github.com/new
-2. 填写仓库信息：
-   - **Repository name**：随意取名，例如 `railway-cloudflare_tunnel-node`
-   - **Visibility**：选择 **Private**（私有，推荐）或 Public
-   - **其它选项全部留空**（不要勾选 Add a README / .gitignore / License）
-3. 点击 **Create repository**。
-4. 创建完毕后，页面会显示一段推送指令，**先不要关闭这个页面**。
-
-### 3.2 在本地推送代码
-
-打开终端，执行以下命令（请将 `<你的用户名>` 替换为你的 GitHub 用户名）：
+将命令中的 `YOUR_REALITY_TLS_HOST` 换成候选域名，在 VPS 手动检查：
 
 ```bash
-# 进入项目目录
-cd /home/san/railway_docker/cloudflare-tunnel
-
-# 初始化 Git 仓库（如果该目录还不是 git 仓库；已初始化过则跳过报错无碍）
-git init
-
-# 提交所有文件
-git add .
-git commit -m "feat: railway cloudflare_tunnel dual-tunnel vless deploy"
-
-# 关联远程仓库（替换为你自己的地址）
-git remote add origin https://github.com/<你的用户名>/railway-cloudflare_tunnel-node.git
-
-# 推送
-git branch -M main
-git push -u origin main
+openssl s_client -connect YOUR_REALITY_TLS_HOST:443 \
+  -servername YOUR_REALITY_TLS_HOST -tls1_3 -alpn h2 -verify_return_error </dev/null
 ```
 
-> **如果提示输入密码**：GitHub 已不再支持密码认证，你需要使用 Personal Access Token。
-> 前往 https://github.com/settings/tokens → **Generate new token (classic)** → 勾选 `repo` 权限 → 生成后将 Token 当作密码粘贴即可。
+检查证书验证成功和 ALPN `h2`。这只是基础条件，最终还需 REALITY 客户端端到端验证。目标域名不要解析到 VPS 本身、回环、私网或云元数据。不要批量扫描无关主机。
 
-推送成功后，刷新 GitHub 仓库页面，应该能看到所有文件（`Dockerfile`、`index.js`、`start.sh` 等）。
+## 3. 初始化与离线导出
 
----
-
-## 四、第三步：在 Railway 创建项目并部署
-
-### 4.1 从 GitHub 仓库部署
-
-1. 登录 https://railway.com 后台。
-2. 点击右上角的 **New Project**（新建项目）。
-3. 在弹出的选项中选择 **Deploy from GitHub repo**。
-4. 如果是第一次使用，Railway 会要求你授权访问 GitHub：
-   - 点击 **Configure GitHub App**。
-   - 在 GitHub 页面中选择 **Only select repositories** → 勾选你刚创建的仓库 → 点击 **Install & Authorize**。
-5. 回到 Railway 页面后，在仓库列表中**点击你的仓库名称**。
-6. Railway 会立即开始构建和部署。
-
-> **💡 重要：本项目不需要配置 Railway 域名和端口**
->
-> 与网上其它教程（云桌面/Xray 手动部署类）不同，本方案的流量通过 cloudflared **出站隧道**转发，完全不依赖 Railway 的入站域名。请**不要**在 Settings → Networking 中 Generate Domain 或修改端口——保持默认即可，画蛇添足反而可能导致固定隧道端口失配。
-
-### 4.2 观察构建过程
-
-部署开始后，你会进入项目仪表盘：
-
-1. 点击页面中央的**服务卡片**（显示你仓库名称的那个方块）。
-2. 点击顶部的 **Deployments** 标签页。
-3. 你会看到一条部署记录，状态为 **Building...**（构建中）。
-4. 点击该部署记录，可以实时查看构建日志：
-   - `Building Dockerfile...` → 正在构建 Docker 镜像
-   - `Successfully built ...` → 构建完成
-   - `Deploying...` → 正在启动容器
-5. 等待状态变为 ✅ **Active**（活跃），表示部署成功。
-
-> **⏱ 首次构建**大约需要 **2 ~ 3 分钟**（下载 cloudflared 二进制文件）。后续重新部署会更快（有缓存）。
-
----
-
-## 五、第四步：设置环境变量
-
-这是最关键的一步。你需要告诉服务"你的 UUID 是什么"以及"是否启用双隧道"。
-
-### 5.1 进入环境变量面板
-
-1. 在项目仪表盘中，点击你的**服务卡片**。
-2. 点击顶部的 **Variables** 标签页。
-3. 你会看到一个变量编辑器。
-
-### 5.2 添加变量
-
-点击 **New Variable** 或 **+ Add**，逐个添加以下变量：
-
-#### 模式一：仅临时隧道（最简配置，适合快速体验）
-
-只需添加 **1 个变量**：
-
-| Variable Name | Value | 说明 |
-|---|---|---|
-| `uuid` | `你的UUID` | 在终端运行 `uuidgen` 生成一个，或者去 https://www.uuidgenerator.net/ 在线生成 |
-
-添加后点击右上角 **Deploy Changes**（应用更改），Railway 会自动重新部署。
-
-#### 模式二：双隧道并行（推荐，需要 Cloudflare 固定隧道）
-
-添加以下 **3 个变量**：
-
-| Variable Name | Value | 说明 |
-|---|---|---|
-| `uuid` | `你的固定UUID` | 同上 |
-| `CLOUDFLARE_TUNNEL_TOKEN` | `eyJhIjoixxxx...` | 从 Cloudflare 获取（见第五步） |
-| `CLOUDFLARE_TUNNEL_DOMAIN` | `proxy.example.com` | 你在 Cloudflare 隧道中绑定的域名 |
-
-可选变量：
-
-| Variable Name | Value | 说明 |
-|---|---|---|
-| `NAME` | `my-node` | 节点名称前缀，不填默认 `cloudflare_tunnel` |
-| `CF_IP` | `108.162.196.94,104.24.146.138` | Cloudflare 优选 IP，逗号分隔多个（每 IP 一个节点）。不填则自动从仓库 `result.csv` 提取前 5 个低延迟 IP |
-
-### 5.3 填写容错说明
-
-本项目对环境变量的填写有**极高的容错性**，你不需要担心格式问题：
-
-| 场景 | 你粘贴的内容 | 系统行为 |
-|---|---|---|
-| 复制了 CF 整行安装命令 | `cloudflared.exe service install eyJhIjoixxxx...` | ✅ 自动提取 `eyJh` 开头的 Token |
-| 域名带了协议前缀 | `https://proxy.example.com/` | ✅ 自动去除 `https://` 和结尾 `/` |
-| Token 和域名填在一起 | `CLOUDFLARE_TUNNEL_TOKEN` 填 `eyJhIjoixxxx... proxy.example.com`，`CLOUDFLARE_TUNNEL_DOMAIN` 留空 | ✅ 自动拆分 Token 和域名 |
-| 只填了 Token 没填域名 | `CLOUDFLARE_TUNNEL_TOKEN` 填了，`CLOUDFLARE_TUNNEL_DOMAIN` 留空且 Token 中没有域名 | ✅ 安全降级为仅临时隧道模式 |
-
-### 5.4 应用变量
-
-所有变量填写完毕后：
-
-1. 点击页面右上角的 **Deploy Changes**（部署更改）按钮。
-2. Railway 会自动触发一次新的部署。
-3. 等待部署状态变为 ✅ **Active**。
-
-> **💡 小技巧**：你也可以用 **RAW Editor** 模式一次性粘贴所有变量。点击变量编辑器右上角的 `RAW Editor` 开关，然后粘贴以下内容：
-> ```
-> uuid=你的UUID
-> CLOUDFLARE_TUNNEL_TOKEN=eyJhIjoixxxx...
-> CLOUDFLARE_TUNNEL_DOMAIN=proxy.example.com
-> NAME=my-node
-> ```
-> 粘贴后点击 **Update Variables** → **Deploy Changes**。
-
----
-
-## 六、第五步：获取 Cloudflare 固定隧道 Token（双隧道模式）
-
-> **如果你只使用临时隧道模式，可以跳过本步骤。**
-
-### 6.1 将域名托管到 Cloudflare
-
-如果你的域名还没有托管到 Cloudflare：
-
-1. 登录 https://dash.cloudflare.com
-2. 点击 **Add a site**（添加站点）→ 输入你的域名 → 选择 **Free** 计划。
-3. Cloudflare 会给出两个 NS 服务器地址（如 `ada.ns.cloudflare.com`）。
-4. 去你的域名注册商后台，将域名的 **NS 记录**改为 Cloudflare 给出的地址。
-5. 回到 Cloudflare 点击 **Check nameservers**，等待生效（通常 5 分钟 ~ 24 小时）。
-
-### 6.2 创建 Cloudflare 隧道
-
-1. 登录 https://one.dash.cloudflare.com（Cloudflare Zero Trust 面板）。
-2. 左侧菜单点击 **Networks** → **Tunnels**。
-3. 点击 **Create a tunnel**（创建隧道）。
-4. 选择 **Cloudflared** 作为连接器类型 → 点击 **Next**。
-5. 给隧道取个名字（如 `railway-vless`）→ 点击 **Save tunnel**。
-
-### 6.3 复制 Token
-
-创建后会进入安装指引页面，你会看到类似这样的内容：
-
-```
-Install and run a connector
-
-...
-
-cloudflared.exe service install eyJhIjoiNGU2ZDc2Y2E3MjZmNTk3NjhhMjNiYTVjMm...
-```
-
-**你需要的是 `eyJh` 开头的那一长串字符**。有两种复制方式：
-
-- **精确复制**：只选中 `eyJh...` 开头的部分，复制到 Railway 的 `CLOUDFLARE_TUNNEL_TOKEN` 变量中。
-- **偷懒复制**：直接复制整行（包括 `cloudflared.exe service install`），粘贴到 `CLOUDFLARE_TUNNEL_TOKEN` 中。脚本会**自动提取**真正的 Token。
-
-### 6.4 配置 Public Hostname（域名指向）
-
-还在同一页面，点击 **Next** 进入 **Public Hostname** 配置：
-
-1. **Subdomain**：填写子域名前缀（如 `proxy`）。
-2. **Domain**：从下拉菜单选择你托管在 Cloudflare 的域名（如 `example.com`）。
-   - 组合起来就是 `proxy.example.com` — 这就是你要填到 `CLOUDFLARE_TUNNEL_DOMAIN` 的值。
-3. **Service**：
-   - **Type** 选择 `HTTP`
-   - **URL** 填写 `localhost:8080`
-4. 点击 **Save tunnel**。
-
-### 6.5 回到 Railway 填写变量
-
-将以下内容填入 Railway 的环境变量面板：
-
-- `CLOUDFLARE_TUNNEL_TOKEN` → 粘贴你复制的 Token（或整行安装命令）
-- `CLOUDFLARE_TUNNEL_DOMAIN` → 填入 `proxy.example.com`（你刚才配置的完整域名）
-
-点击 **Deploy Changes** 触发重新部署。
-
----
-
-## 七、第六步：确认部署成功
-
-### 7.1 查看部署日志
-
-1. 在 Railway 仪表盘点击你的服务卡片。
-2. 点击 **Deployments** → 点击最新的部署记录。
-3. 在 **Deploy Logs**（部署日志）中，你应该看到类似以下输出：
-
-```
-╔══════════════════════════════════════════════╗
-║   Railway Cloudflare Tunnel VLESS-WS 轻量节点（双隧道）   ║
-╚══════════════════════════════════════════════╝
-
-  UUID:     xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-  端口:     8080
-  节点名:   cloudflare_tunnel
-
-[✓] Node.js VLESS-WS 服务已启动 (PID: 7)
-
-┌─ 固定隧道 ────────────────────────────────┐
-│  域名: proxy.example.com
-└────────────────────────────────────────────┘
-[✓] 固定隧道已启动 (PID: 13)
-
-┌─ 临时隧道 ────────────────────────────────┐
-│  等待 cloudflared 分配域名...              │
-└────────────────────────────────────────────┘
-[✓] 临时隧道已启动 (PID: 15)
-    域名: xxxx-xxxx-xxxx.trycloudflare.com
-
-╔══════════════════════════════════════════════╗
-║   ✅ 部署成功                                ║
-╚══════════════════════════════════════════════╝
-```
-
-### 7.2 关键检查点
-
-| 日志内容 | 含义 |
-|---|---|
-| `[✓] Node.js VLESS-WS 服务已启动` | 核心代理服务正常 |
-| `[✓] 固定隧道已启动` | Token 有效，固定隧道连接成功 |
-| `[✓] 临时隧道已启动` + 显示 `.trycloudflare.com` 域名 | 备用隧道正常 |
-| `[!] 固定隧道启动失败` | Token 无效或过期，请检查 |
-| `[i] 未设 CLOUDFLARE_TUNNEL_TOKEN，跳过固定隧道` | 你没配 Token，正常现象（仅临时隧道模式） |
-
----
-
-## 八、第七步：获取节点链接 / Clash 订阅
-
-部署成功后，你有两种方式使用节点：
-
-### 8.1 方式一：获取 VLESS 节点链接
-
-在浏览器中访问：
-
-```
-https://<你的CLOUDFLARE_TUNNEL域名>/<你的UUID>
-```
-
-例如：`https://proxy.example.com/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`
-
-页面会返回纯文本的 `vless://` 链接（每行一条）。你可以直接复制到 V2rayN / Nekoray / Shadowrocket 等客户端中导入。
-
-### 8.2 方式二：导入 Clash / Mihomo 订阅（推荐）
-
-这是最方便的方式，订阅会**自动包含双隧道的节点**和**自动故障切换策略**。
-
-**订阅地址：**
-```
-https://<你的CLOUDFLARE_TUNNEL域名>/<你的UUID>/clash
-```
-
-**在 Clash Verge Rev / Mihomo Party 中导入：**
-
-1. 打开 Clash Verge Rev（或 Mihomo Party）。
-2. 找到 **订阅管理** / **Profiles** 页面。
-3. 点击 **新建** / **Import** / **+**。
-4. 在 **URL** 栏粘贴上面的订阅地址。
-5. 点击 **导入** / **Save**。
-6. 导入成功后，你会看到以下配置被自动加载：
-   - **代理组 `Proxy-Select`**：主入口，包含 Auto-Fallback、隧道域名节点（Cloudflare-Tunnel-Fixed / Cloudflare-Tunnel-Tmp）和 `cf-ip` 组
-   - **代理组 `Auto-Fallback`**：自动优先走固定隧道，失败无感切换到临时隧道
-   - **代理组 `cf-ip`**（配置了优选 IP 时）：所有优选 IP 节点（Cloudflare-Tunnel-Fixed-1..N / Cloudflare-Tunnel-Tmp-1..N），url-test 自动选延迟最低者；在 `Proxy-Select` 中选中即可切换使用
-   - **分流规则**：国内直连，境外走代理
-
-7. 在 **Proxies**（代理）页面，`Proxy-Select` 保持选择 `Auto-Fallback` 即可。
-8. 点击 **System Proxy**（系统代理）或 **TUN 模式** 开关，即可开始使用。
-
-> **💡 什么时候用 `cf-ip` 组**：域名节点走 Cloudflare 默认路由，稳定但延迟一般；`cf-ip` 组走你实测最优的 IP，延迟可能更好。想对比时，在 `Proxy-Select` 中直接选中 `cf-ip` 即可。
-
-### 8.3 如果只用了临时隧道（没配固定域名）
-
-临时隧道的域名是 `xxx.trycloudflare.com`，你需要在 Railway 日志中找到它。
-
-1. 进入 Railway → 你的服务 → **Deployments** → 点击最新部署 → 查看日志。
-2. 找到 `域名: xxxx-xxxx-xxxx.trycloudflare.com` 这一行。
-3. 使用这个域名替代上面的 `<你的CLOUDFLARE_TUNNEL域名>`。
-
-> **⚠️ 注意**：临时隧道域名在每次重启后都会变化。如果你经常使用，强烈建议配置固定隧道。
-
----
-
-## 九、日常维护操作
-
-### 9.1 修改环境变量
-
-1. Railway 仪表盘 → 点击服务卡片 → **Variables** 标签。
-2. 找到要修改的变量 → 点击变量值进行编辑。
-3. 修改完成后点击右上角 **Deploy Changes**。
-4. Railway 会自动重新部署（约 30 秒 ~ 1 分钟）。
-
-### 9.2 查看实时日志
-
-1. Railway 仪表盘 → 点击服务卡片 → **Deployments** 标签。
-2. 点击最新的（状态为 Active 的）部署记录。
-3. 切换到 **Deploy Logs** 查看实时输出。
-
-### 9.3 手动重启服务
-
-如果遇到问题需要重启：
-
-1. Railway 仪表盘 → 点击服务卡片 → **Deployments** 标签。
-2. 点击页面右上角的 **⋮**（三个点菜单）。
-3. 选择 **Restart** → 确认。
-
-### 9.4 暂停 / 恢复服务
-
-如果你暂时不使用，想停止计费：
-
-- **暂停**：服务卡片 → **Settings** 标签 → 向下滚动找到 **Delete Service** 区域上方的暂停/移除选项。
-  - 或者直接在 **Deployments** 页面点 **⋮** → **Remove**（移除当前部署）。
-- **恢复**：重新触发一次部署（推送一个新 commit，或点击 **⋮** → **Redeploy**）。
-
-### 9.5 查看费用
-
-1. 点击 Railway 左上角头像 → **Usage**（用量）。
-2. 可以看到当前周期的 CPU、内存、网络用量和估计费用。
-
----
-
-## 十、常见问题排查
-
-### Q1：部署后日志显示 "[✗] Node.js 启动失败"
-
-**原因**：通常是 `uuid` 环境变量未设置或格式错误。
-
-**解决**：
-1. 进入 **Variables** 确认 `uuid` 变量存在且值是合法的 UUID 格式（如 `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`）。
-2. 注意变量名是小写的 `uuid`，不是 `UUID`。
-
----
-
-### Q2：固定隧道启动失败，日志显示 "[✗] 固定隧道启动失败"
-
-**原因**：`CLOUDFLARE_TUNNEL_TOKEN` 无效、已失效，或复制不完整。
-
-启动脚本会把 cloudflared 的**错误详情直接打印在失败提示下方的虚线框内**，对号入座：
-
-| 日志中的报错 | 含义与解决 |
-|---|---|
-| `invalid character` / `Couldn't parse token` / `token is malformed` | Token 复制不完整或被截断。重新完整复制 `eyJh` 开头的整串字符（很长，注意别漏结尾） |
-| `unauthorized` / `401` / `403` / `not found` | Token 已失效。隧道被删除或重建过，回 Cloudflare 重新创建隧道并复制新 Token |
-| `edge discovery` / 连接超时类报错 | 网络瞬时问题，通常重启部署即可恢复 |
-
-**可选：本地验证 Token 是否有效**
-
-在本机安装 cloudflared 后运行：
+进入本仓库目录：
 
 ```bash
-cloudflared tunnel run --token <你的Token>
+npm run init -- YOUR_VPS_IP YOUR_REALITY_TLS_HOST phone laptop
+npm run export -- clients
 ```
 
-看到 `Connected` 字样说明 Token 有效（Ctrl+C 退出）；立即报错则说明 Token 本身有问题。
+命令生成 `.env`、每设备一个 UUID、服务端 X25519 私钥和 short ID，不打印秘密。`.env` 0600、导出目录 0700、客户端文件 0600；已有文件或目录不覆盖。设备名称限 1..32 个英文字母、数字、下划线和连字符，首字符是字母或数字。
 
-**解决步骤**：
-1. 回到 Cloudflare Zero Trust → **Networks** → **Tunnels** → 确认隧道存在。
-2. 如果隧道已被删除或重建，重新创建隧道，复制新 Token 更新到 Railway 的 `CLOUDFLARE_TUNNEL_TOKEN`。
-3. 确认 `CLOUDFLARE_TUNNEL_TOKEN` 变量值是以 `eyJh` 开头的**完整**字符串。
+可以在可信本地电脑初始化，然后使用 SSH/SCP 安全传输 `.env` 至 VPS 同目录，并确认 `chmod 600 .env`；不要将 `.env` 推送到 Git。向手机只传 `phone.*`，向电脑只传对应文件。客户端不需要服务端私钥。
 
----
+所有环境变量定义在 [.env.example](.env.example)。`SERVER_ADDRESS` 仅做 IP/域名语法校验，不自动判断公网可达性；公网部署必须填写实际可达的 VPS 公网地址，不要填内网/回环地址。`SERVER_PORT` 默认 443，既用于 Compose 端口映射，也用于导出客户端地址；修改后重建容器并重新分发客户端。内部监听固定 8443，不使用 Railway `PORT`。
 
-### Q3：Clash 订阅导入后显示 0 个节点
+## 4. 启动与检查
 
-**原因**：订阅 URL 中的 UUID 与环境变量中设置的不一致。
+```bash
+docker compose up -d --build
+docker compose ps
+docker compose logs --tail 20
+```
 
-**解决**：
-1. 确认 URL 中的 UUID 与 Railway Variables 面板里的 `uuid` 值**完全一致**。
-2. 确认 URL 格式正确：`https://域名/UUID/clash`（注意最后是 `/clash`）。
+启动顺序：校验必填参数 → 写内存配置 → Xray `run -test` → `exec` Xray。任一验证失败都不会启动代理。配置检查输出默认隐藏，以免核心错误信息暴露私钥；只显示通用失败提示。
 
----
+日志出现 `Configuration validated; starting Xray.` 只代表本机配置有效，不证明外部网络、REALITY 目标站或大陆客户端可用。用真实客户端导入后访问 HTTPS 页面验证。`curl https://VPS_IP` 不是有效的 REALITY 代理测试，不提供 `/health`、UUID 路径或在线订阅。
 
-### Q4：域名可以访问但节点连接失败
+配置有误时先核对 `.env` 字段格式、端口、目标站连接，运行 `npm test`。若必须执行核心详细检查，仅在可信终端中生成配置并运行 `xray run -test -config FILE`；不要公开输出，完成后妥善处理包含私钥的文件。服务端日常访问、DNS 与错误流量日志关闭，Docker 只保留有限启动信息。
 
-**原因**：客户端参数配置错误。
+## 5. 客户端路由与防泄漏
 
-**检查清单**：
-- 协议：`VLESS`
-- 端口：`443`
-- 加密方式：`none`
-- 传输协议：`ws`
-- 伪装路径（Path）：`/`
-- TLS：`开启`
-- SNI 和 Host：都填 Cloudflare Tunnel 域名
+已验证 Xray 26.10.31 和 Mihomo 1.19.33。Mihomo 优先导入对应设备的 `.mihomo.yaml`，它明确开启 `reality-opts.support-x25519mlkem768: true`；当前服务端要求对应混合密钥交换握手，旧客户端可能不兼容。单条 `.vless.txt` 不能保证导入器携带此非通用参数，导入后需要手动确认；不要关闭证书校验来规避失败。
 
----
+完整 Mihomo 配置默认全代理，无 DIRECT 故障回退；单条 VLESS 链接只有节点参数，不包含 DNS、路由或断线保护配置。
 
-### Q5：Railway 显示 "Service sleeping" 或服务被暂停
+- 在客户端配置 TUN/DNS 接管，系统级断线保护使用该客户端支持的严格路由或防火墙功能。
+- 系统代理模式通常不能覆盖所有应用；浏览器 DoH、IPv6 和应用自带 UDP 可能绕过它，需要实测。
+- 从客户端断开代理、停止核心、切换 Wi-Fi/移动网络，检查需要保护的应用是否仍能直连。
+- 代理 DNS 默认只监听本机 1053；导入配置本身不会把系统 DNS 自动指向该端口。需要客户端接管才能覆盖系统解析。
+- 国内直连属于主动降低代理覆盖范围，按实际需求添加规则，不把 DIRECT 加入故障回退组。
 
-**原因**：Trial 计划的免费额度用完或超时。
+## 6. 设备撤销、备份与升级
 
-**解决**：
-1. 升级到 Hobby 计划（$5/月起步，按量扣费）。
-2. 或者等待下个月免费额度重置。
+在 `.env` 的 `VLESS_CLIENTS` JSON 数组中添加/删除设备，UUID 用本地 `node -e 'console.log(require("node:crypto").randomUUID())'` 生成。设备 UUID 必须唯一；名称不能与客户端内置策略及 `PROXY` 组冲突。
 
----
+```bash
+docker compose up -d --force-recreate
+npm run export -- clients-updated
+```
 
-### Q6：每次重启临时隧道域名都变了怎么办？
+撤销通过重建容器生效，会断开旧连接；重新导出不会自动删除其他设备已持有的文件。导出目录必须是新目录，避免误覆盖。
 
-这是临时隧道的正常行为。解决方案：
+服务端私钥变更需要全部设备更新；设备凭证泄露时可只替换/撤销该设备 UUID。加密备份 `.env`，不备份 `/run/xray` tmpfs。停止使用时执行 `docker compose down`；此命令保留本地 `.env` 和导出文件。
 
-1. **最佳方案**：配置固定隧道（添加 `CLOUDFLARE_TUNNEL_TOKEN` + `CLOUDFLARE_TUNNEL_DOMAIN`），使用 Clash 订阅的自动回退功能。
-2. **临时方案**：每次重启后重新从日志中获取新域名。
+更新 Xray 时同时更新 Dockerfile 的版本、两个架构的 SHA256 并运行测试与真实核心检查；不要仅修改版本号。Node 基础镜像在同一 LTS 大版本内获取补丁，发布镜像前应进行构建和依赖扫描。
 
----
+## 7. 从旧版迁移
 
-### Q7：延迟很高（200ms+）怎么优化？
+旧版 Cloudflare 双隧道、临时域名、优选 IP、WS 节点和 Railway 模板已移除；旧 UUID URL 和订阅链接不再可用。更新所有客户端后，再停止旧部署，避免重复费用。
 
-Cloudflare Tunnel 方案的流量链路是 `客户端 → Cloudflare 边缘 → CF 骨干 → 隧道入口 → Railway 容器`，延迟由前两段决定。按效果排序：
-
-**1. 确认 Railway 区域为新加坡（最常见原因）**
-
-默认区域是美西，从国内访问绕路严重：
-
-1. 点击 Railway 左上角头像 → **Settings** → **General**。
-2. **Preferred Deployment Region** 选择 **Singapore** → **Update Region**。
-3. 回到项目 → **Deployments** → **⋮** → **Redeploy**，让服务迁移到新区域。
-
-**2. 配置 Cloudflare 优选 IP（优化"客户端 → CF 边缘"段）**
-
-1. 下载 [CloudflareSpeedTest](https://github.com/XIU2/CloudflareSpeedTest)，在本机运行测速。
-   - 不同运营商（电信/联通/移动）的最优 IP 不同，以你本机实测为准。
-2. 测速完成后，把生成的 `result.csv` 放进仓库根目录（与 `Dockerfile` 同级），提交推送：
-   ```bash
-   git add result.csv && git commit -m "update CF IPs" && git push
-   ```
-3. Railway 自动重新部署，启动脚本会从 `result.csv` 提取**丢包率为 0 且测速有效**的前 5 个低延迟 IP，每个 IP 生成一个节点（`Cloudflare-Tunnel-Fixed-1` ~ `Cloudflare-Tunnel-Fixed-5`），配合 Auto-Fallback 自动选优。
-4. 以后优选 IP 劣化时，重新测速 → 替换 `result.csv` → 推送即可，**无需改动 Railway 面板变量**。
-
-> 💡 也可以在 Railway **Variables** 手动设置 `CF_IP`（逗号分隔多个），手动设置的优先级高于 `result.csv`。
-
-**3. 优先使用固定隧道节点**
-
-Clash 代理组选择 `♻️ Auto-Fallback`（默认优先固定隧道），或手动选 `Cloudflare-Tunnel-Fixed`。
-
-**4. 如果以上仍不满足需求**
-
-CF 免费 CDN 的物理绕行决定了 ~150ms 起步。追求极致延迟可改用同目录 [`quick-deploy/`](../quick-deploy/) 直连方案（客户端直连 Railway 新加坡，可低至 60 ~ 120ms），代价是抗封能力弱，适合临时使用。
-
-**延迟参考（国内出发）：**
-
-| 方案 | 典型延迟 |
-|---|---|
-| 直连 Railway 新加坡 | 60 ~ 120ms |
-| Cloudflare Tunnel 隧道 + 优选 IP | 120 ~ 180ms |
-| Cloudflare Tunnel 隧道默认路由（美西区域） | 200 ~ 350ms |
-
----
-
-> 📝 如有其他问题，请查阅项目主文档 [README.md](./README.md) 获取更多技术细节。
+此前明文 Tunnel Token 已进入旧 Git 提交，应在 Cloudflare 撤销/轮换；本次移除当前副本，没有清理远端历史。根目录的旧 Railway 指南、`quick-deploy/` 和历史设计文档不属于本次迁移产物，不应继续照其部署本版本。

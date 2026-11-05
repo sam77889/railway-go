@@ -1,31 +1,27 @@
-# ============================================================
-# Railway Cloudflare Tunnel VLESS-WS 轻量节点 — Dockerfile
-# 
-# 设计目标：极致轻量，最低成本
-# - node:20-alpine 基础镜像（~50MB）
-# - cloudflared 预编译二进制（~60MB）
-# - 运行时内存 ~60-80MB（Node ~40MB + cloudflared ~30MB）
-# - 无 Xray/sing-box，纯 Node.js 实现 VLESS 协议
-# ============================================================
+FROM alpine:3.22 AS xray
+ARG TARGETARCH
+# Fixed release and independently pinned SHA256 for both supported architectures.
+RUN apk add --no-cache ca-certificates curl unzip \
+    && case "$TARGETARCH" in \
+         amd64) asset=64; checksum=e4bd9119f50ae7c41658b1abd0679ae06f98bd864a2907ff33f2f2cf7081b214 ;; \
+         arm64) asset=arm64-v8a; checksum=1811c8f1da0c3b6dc707ebaf1c8390e987ba39859a8f0a7aadd8526157f2ec8d ;; \
+         *) echo 'Unsupported architecture; use linux/amd64 or linux/arm64' >&2; exit 1 ;; \
+       esac \
+    && curl --fail --location --retry 3 -o /tmp/xray.zip \
+       "https://github.com/XTLS/Xray-core/releases/download/v26.10.31/Xray-linux-${asset}.zip" \
+    && printf '%s  /tmp/xray.zip\n' "$checksum" | sha256sum -c - \
+    && unzip /tmp/xray.zip xray -d /usr/local/bin \
+    && chmod 0755 /usr/local/bin/xray \
+    && /usr/local/bin/xray version
 
-FROM node:20-alpine
-
-# 安装 cloudflared（仅支持 amd64，Railway 默认架构）
-RUN apk add --no-cache curl \
-    && curl -Lo /usr/local/bin/cloudflared \
-       https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
-    && chmod +x /usr/local/bin/cloudflared \
-    && apk del curl \
-    && rm -rf /var/cache/apk/*
-
+FROM node:24-alpine
+ENV NODE_ENV=production
 WORKDIR /app
-
-# 先复制 package.json 利用 Docker 层缓存
-COPY package.json ./
-RUN npm install --production && npm cache clean --force
-
-# 复制应用代码
-COPY . .
-RUN chmod +x start.sh
-
-CMD ["sh", "start.sh"]
+COPY --from=xray /usr/local/bin/xray /usr/local/bin/xray
+COPY --from=xray /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --chown=node:node lib/ ./lib/
+COPY --chown=node:node scripts/ ./scripts/
+COPY --chown=node:node package.json start.sh ./
+USER node
+EXPOSE 8443/tcp
+CMD ["sh", "/app/start.sh"]

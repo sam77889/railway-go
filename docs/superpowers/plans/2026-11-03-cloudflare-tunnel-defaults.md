@@ -1,5 +1,7 @@
 # Cloudflare Tunnel Default Variables Implementation Plan
 
+> Archived: superseded by the 2026-11-05 VPS design. Legacy credentials below were redacted; any previously committed Token must be revoked at the provider.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Give the fixed Cloudflare Tunnel domain and Token matching defaults in Railway templates and direct `start.sh` execution while preserving explicit environment-variable overrides.
@@ -36,7 +38,7 @@ const fs = require('fs');
 const template = require('./template.json');
 const start = fs.readFileSync('./start.sh', 'utf8');
 const expectedDomain = 'go.chen9527.top';
-const expectedToken = 'eyJhIjoiYzYzYTFmNzAyYWUzNzJhZjkzYWVjNmFlZWFjNzcxNDAiLCJ0IjoiZGZkYzgwYzctMzRiNy00MzQ0LThhZGQtMjViYmY1YmI3YzMyIiwicyI6IlpESmxZemMxTm1VdE1HWTNOeTAwTTJNeExUaGhOVE10WkdJeE1EUTBaRFkzWTJZeSJ9';
+const expectedToken = 'REDACTED_LEGACY_TOKEN';
 if (template.variables.CLOUDFLARE_TUNNEL_DOMAIN.defaultValue !== expectedDomain) process.exit(1);
 if (template.variables.CLOUDFLARE_TUNNEL_TOKEN.defaultValue !== expectedToken) process.exit(1);
 if (!start.includes(`RAW_DOMAIN=\${CLOUDFLARE_TUNNEL_DOMAIN:-${expectedDomain}}`)) process.exit(1);
@@ -53,7 +55,7 @@ Change the two entries in `template.json` to:
 ```json
 "CLOUDFLARE_TUNNEL_TOKEN": {
   "description": "【双隧道可选】Cloudflare Zero Trust 隧道 Token。不填则使用内置默认 Token。",
-  "defaultValue": "eyJhIjoiYzYzYTFmNzAyYWUzNzJhZjkzYWVjNmFlZWFjNzcxNDAiLCJ0IjoiZGZkYzgwYzctMzRiNy00MzQ0LThhZGQtMjViYmY1YmI3YzMyIiwicyI6IlpESmxZemMxTm1VdE1HWTNOeTAwTTJNeExUaGhOVE10WkdJeE1EUTBaRFkzWTJZeSJ9"
+  "defaultValue": "REDACTED_LEGACY_TOKEN"
 },
 "CLOUDFLARE_TUNNEL_DOMAIN": {
   "description": "【双隧道可选】固定隧道域名；不填则使用内置默认域名。",
@@ -67,7 +69,7 @@ Change the corresponding `start.sh` assignments to:
 
 ```sh
 RAW_DOMAIN=${CLOUDFLARE_TUNNEL_DOMAIN:-go.chen9527.top}
-RAW_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN:-eyJhIjoiYzYzYTFmNzAyYWUzNzJhZjkzYWVjNmFlZWFjNzcxNDAiLCJ0IjoiZGZkYzgwYzctMzRiNy00MzQ0LThhZGQtMjViYmY1YmI3YzMyIiwicyI6IlpESmxZemMxTm1VdE1HWTNOeTAwTTJNeExUaGhOVE10WkdJeE1EUTBaRFkzWTJZeSJ9}
+RAW_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN:-REDACTED_LEGACY_TOKEN}
 ```
 
 - [ ] **Step 4: Run the configuration assertion again**

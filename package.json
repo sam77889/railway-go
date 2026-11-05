@@ -1,18 +1,17 @@
 {
-  "name": "railway-cloudflare_tunnel-vless-ws",
-  "version": "1.0.0",
-  "description": "Cloudflare Tunnel Tunnel + VLESS-WS lightweight node for Railway (lowest cost)",
-  "main": "index.js",
-  "author": "based on yonggekkk/cloudflare_tunnelsbx",
+  "name": "vps-xray-reality",
+  "version": "2.0.0",
+  "description": "VPS Xray REALITY deployment and offline per-device configuration",
   "license": "MIT",
   "private": true,
   "scripts": {
-    "start": "sh start.sh"
+    "start": "sh start.sh",
+    "test": "node --test test/*.test.js",
+    "test:integration": "node --test integration/*.test.js",
+    "init": "node scripts/manage.js init",
+    "export": "node --env-file=.env scripts/manage.js export"
   },
   "engines": {
-    "node": ">=18"
-  },
-  "dependencies": {
-    "ws": "^8.18.0"
+    "node": ">=22"
   }
 }

@@ -1,4 +1,14 @@
 node_modules/
 .env
+.env.*
+!.env.example
+clients/
+clients-*/
+*.vless.txt
+*.mihomo.yaml
+server.json
+config.json
+*.pem
+*.key
 *.log
 .DS_Store

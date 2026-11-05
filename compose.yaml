@@ -1,0 +1,24 @@
+services:
+  xray:
+    build: .
+    image: vps-xray-reality:local
+    env_file: .env
+    ports:
+      - "${SERVER_PORT:-443}:8443/tcp"
+    user: "1000:1000"
+    read_only: true
+    tmpfs:
+      - /run/xray:uid=1000,gid=1000,mode=0700,size=1m,noexec,nosuid,nodev
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    stop_grace_period: 15s
+    pids_limit: 128
+    mem_limit: 256m
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "2"
