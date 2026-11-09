@@ -124,8 +124,8 @@ function receive(ws, size) {
   });
 }
 
-test('default Node mode retains both tunnel subscriptions and the independent cf-ip group', { timeout: 12000 }, async t => {
-  const app = await start(t, { missingBinary: true });
+test('explicit Node mode retains both tunnel subscriptions and the independent cf-ip group', { timeout: 12000 }, async t => {
+  const app = await start(t, { mode: 'node', missingBinary: true });
   const links = (await (await fetch(`http://127.0.0.1:${app.port}/${UUID}`)).text()).trim().split('\n').map(value => new URL(value));
   assert.equal(links.length, 6);
   assert.ok(links.every(link => link.protocol === 'vless:' && link.searchParams.get('path') === '/'));
@@ -139,7 +139,8 @@ test('default Node mode retains both tunnel subscriptions and the independent cf
   assert.ok(!fallback.includes('Cloudflare-Tunnel-Fixed-1'));
 });
 
-test('default Node mode still relays VLESS TCP on the original root path', { timeout: 12000 }, async t => {
+for (const mode of ['node', 'both']) {
+test(`${mode} mode relays VLESS TCP on the original root path`, { timeout: 12000 }, async t => {
   const clients = new Set();
   const echo = net.createServer(client => {
     clients.add(client);
@@ -151,7 +152,7 @@ test('default Node mode still relays VLESS TCP on the original root path', { tim
     for (const client of clients) client.destroy();
     return new Promise(resolve => echo.close(resolve));
   });
-  const app = await start(t);
+  const app = await start(t, { mode: mode === 'both' ? undefined : mode });
   const ws = await socket(t, app.port, '/');
   const payload = Buffer.from('existing VLESS TCP');
   const response = receive(ws, payload.length + 2);
@@ -160,12 +161,12 @@ test('default Node mode still relays VLESS TCP on the original root path', { tim
   ws.close(); await once(ws, 'close');
 });
 
-test('default Node mode retains VLESS UDP relay', { timeout: 12000 }, async t => {
+test(`${mode} mode retains VLESS UDP relay`, { timeout: 12000 }, async t => {
   const echo = dgram.createSocket('udp4');
   echo.on('message', (message, peer) => echo.send(message, peer.port, peer.address));
   echo.bind(0, '127.0.0.1'); await once(echo, 'listening');
   t.after(() => new Promise(resolve => echo.close(resolve)));
-  const app = await start(t);
+  const app = await start(t, { mode: mode === 'both' ? undefined : mode });
   const ws = await socket(t, app.port, '/');
   const payload = Buffer.from('existing UDP');
   const frame = Buffer.alloc(2); frame.writeUInt16BE(payload.length);
@@ -175,12 +176,12 @@ test('default Node mode retains VLESS UDP relay', { timeout: 12000 }, async t =>
   ws.close(); await once(ws, 'close');
 });
 
-test('default Node mode retains Mihomo XUDP relay', { timeout: 12000 }, async t => {
+test(`${mode} mode retains Mihomo XUDP relay`, { timeout: 12000 }, async t => {
   const echo = dgram.createSocket('udp4');
   echo.on('message', (message, peer) => echo.send(message, peer.port, peer.address));
   echo.bind(0, '127.0.0.1'); await once(echo, 'listening');
   t.after(() => new Promise(resolve => echo.close(resolve)));
-  const app = await start(t);
+  const app = await start(t, { mode: mode === 'both' ? undefined : mode });
   const ws = await socket(t, app.port, '/');
   const targetPort = echo.address().port;
   const address = Buffer.from([targetPort >> 8, targetPort & 255, 1, 127, 0, 0, 1]);
@@ -195,6 +196,8 @@ test('default Node mode retains Mihomo XUDP relay', { timeout: 12000 }, async t 
   assert.equal(actual[6], 2); // Keep frame in the response, after VLESS response header.
   ws.close(); await once(ws, 'close');
 });
+
+}
 
 test('Rust subscriptions include VLESS and Trojan across both tunnels and preferred IPs', { timeout: 12000 }, async t => {
   const app = await start(t, { mode: 'railway-xray' });
@@ -213,6 +216,94 @@ test('Rust subscriptions include VLESS and Trojan across both tunnels and prefer
   assert.equal((yaml.match(/udp: false/g) || []).length, 12);
   assert.ok(yaml.includes(`password: ${JSON.stringify(PASSWORD)}`));
   assert.equal((yaml.match(/udp: true/g) || []).length, 0);
+});
+
+test('default both mode publishes distinct Node VLESS, Rust VLESS and Trojan nodes', { timeout: 12000 }, async t => {
+  const app = await start(t);
+  const links = (await (await fetch(`http://127.0.0.1:${app.port}/${UUID}`)).text()).trim().split('\n').map(value => new URL(value));
+  assert.equal(links.length, 18);
+  for (const route of ['/', '/vless', '/trojan']) {
+    assert.equal(links.filter(link => link.searchParams.get('path') === route).length, 6);
+  }
+  assert.equal(new Set(links.map(link => link.hash)).size, 18);
+  const yaml = await (await fetch(`http://127.0.0.1:${app.port}/${UUID}/clash`)).text();
+  assert.equal((yaml.match(/type: vless/g) || []).length, 12);
+  assert.equal((yaml.match(/type: trojan/g) || []).length, 6);
+  assert.equal((yaml.match(/udp: true/g) || []).length, 6);
+  assert.equal((yaml.match(/udp: false/g) || []).length, 12);
+  assert.match(yaml, /name: Cloudflare-Tunnel-Xray-Fixed/);
+  assert.match(yaml, /name: Cloudflare-Tunnel-Trojan-Fixed/);
+  const names = [...yaml.matchAll(/^  - name: (.+)$/gm)].map(match => match[1]);
+  assert.equal(new Set(names).size, names.length);
+});
+
+for (const route of ['/vless', '/trojan']) {
+  test(`default both mode forwards ${route} through Rust while Node is enabled`, { timeout: 12000 }, async t => {
+    const app = await start(t);
+    const ws = await socket(t, app.port, route);
+    const data = Buffer.concat([route === '/trojan' ? trojanHeader(443) : header(443), Buffer.from('Rust payload')]);
+    const response = receive(ws, data.length);
+    ws.send(data);
+    assert.deepEqual(await response, data);
+    assert.equal(fs.readFileSync(app.capture, 'utf8').trim(), JSON.stringify(route));
+    ws.close(); await once(ws, 'close');
+  });
+}
+
+test('default both mode does not bypass Rust authentication through root routing', { timeout: 12000 }, async t => {
+  const app = await start(t);
+  const ws = await socket(t, app.port, '/vless');
+  const data = header(443); data[1] ^= 255;
+  const closed = once(ws, 'close'); ws.send(data);
+  assert.equal((await closed)[0], 1008);
+  assert.equal(fs.existsSync(app.capture), false);
+});
+
+test('default both mode fails when its Rust executable cannot start', { timeout: 12000 }, async t => {
+  const app = await start(t, { missingBinary: true, expectExit: true });
+  let timer;
+  const result = await Promise.race([app.exited, new Promise(resolve => { timer = setTimeout(() => resolve(null), 2000); })]);
+  clearTimeout(timer);
+  assert.deepEqual(result, { code: 1, signal: null });
+});
+
+test('default both mode rejects unknown and query-modified upgrade paths', { timeout: 12000 }, async t => {
+  const app = await start(t);
+  for (const route of ['/vmess', '/ss', '/?path=/vless', '/vless?path=/']) {
+    const ws = new WebSocket(`ws://127.0.0.1:${app.port}${route}`);
+    ws.on('error', () => {});
+    const response = new Promise(resolve => ws.once('unexpected-response', (_req, res) => {
+      res.resume(); ws.terminate(); resolve(res.statusCode);
+    }));
+    assert.equal(await response, 404);
+  }
+  assert.equal(fs.existsSync(app.capture), false);
+});
+
+test('default both mode closes active Node and Rust connections on SIGTERM', { timeout: 12000 }, async t => {
+  const clients = new Set();
+  const echo = net.createServer(client => {
+    clients.add(client); client.once('close', () => clients.delete(client)); client.pipe(client);
+  });
+  echo.listen(0, '127.0.0.1'); await once(echo, 'listening');
+  t.after(() => {
+    for (const client of clients) client.destroy();
+    return new Promise(resolve => echo.close(resolve));
+  });
+  const app = await start(t);
+  const node = await socket(t, app.port, '/');
+  const rust = await socket(t, app.port, '/vless');
+  const payload = Buffer.from('active connection');
+  const nodeResponse = receive(node, payload.length + 2);
+  node.send(Buffer.concat([header(echo.address().port), payload]));
+  assert.deepEqual(await nodeResponse, Buffer.concat([Buffer.from([0, 0]), payload]));
+  const rustPayload = Buffer.concat([header(443), payload]);
+  const rustResponse = receive(rust, rustPayload.length);
+  rust.send(rustPayload); assert.deepEqual(await rustResponse, rustPayload);
+  const closed = Promise.all([node, rust].map(ws => new Promise(resolve => ws.once('close', resolve))));
+  app.child.kill('SIGTERM');
+  assert.deepEqual(await app.exited, { code: 0, signal: null });
+  await closed;
 });
 
 for (const route of ['/', '/vless', '/trojan']) {

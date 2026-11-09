@@ -22,7 +22,7 @@ RUN set -eu; \
     chmod 0755 /usr/local/bin/cloudflared /usr/local/bin/railway-xray
 
 WORKDIR /app
-ENV NODE_ENV=production PROXY_BACKEND=node
+ENV NODE_ENV=production PROXY_BACKEND=both
 
 COPY --chown=node:node package.json package-lock.json ./
 RUN npm ci --omit=dev --no-audit --no-fund

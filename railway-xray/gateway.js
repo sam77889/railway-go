@@ -196,6 +196,10 @@ function createGateway(config, options = {}) {
     noServer: true, perMessageDeflate: false, maxPayload: MAX_PAYLOAD,
   });
   server.on('upgrade', (req, socket, head) => {
+    if (req.url === '/' && options.rootUpgrade) {
+      options.rootUpgrade(req, socket, head);
+      return;
+    }
     const protocol = req.url === '/vless' || (options.vlessRoot && req.url === '/')
       ? 'vless' : req.url === '/trojan' ? 'trojan' : null;
     if (!protocol) {

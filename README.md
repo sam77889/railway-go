@@ -2,12 +2,12 @@
 
 [![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/new)
 
-> **Cloudflare Tunnel 双隧道（固定 + 临时并行） + 可选 Node / Railway Xray 后端 + Clash / Mihomo 订阅**
+> **Cloudflare Tunnel 双隧道（固定 + 临时并行） + 默认 Node / Railway Xray 双后端 + Clash / Mihomo 订阅**
 >
 > 流量链路：`客户端 → Cloudflare CDN (443/TLS) → Cloudflare Tunnel → cloudflared → Node.js 网关 / 订阅服务 → 所选后端 → 目标站点`
 >
 > 整理时间：2026-07-31
-> 后端合并：2026-11-09；40 项自动化测试及真实 Rust 隔离验证通过，详见[验证记录](docs/verification-2026-11-09.md)。
+> 后端合并与默认并行：2026-11-09；50 项自动化测试及真实 Rust 隔离验证通过，详见[验证记录](docs/verification-2026-11-09.md)。
 
 ---
 
@@ -15,14 +15,17 @@
 
 本方案在单隧道的基础上升级为 **Cloudflare Tunnel 双隧道架构** 并内置 **Clash / Mihomo YAML 订阅服务器**。在维持超低内存与成本的同时，实现了节点的高度稳定与自动化切换。
 
-当前部署代码完全位于本目录，包括 `railway-xray/` 子目录，无需引用相邻的独立部署目录。`PROXY_BACKEND=node` 为默认值，保留原有 VLESS `/`、TCP/UDP/XUDP、双隧道和优选 IP。设置 `PROXY_BACKEND=railway-xray` 后，同一 Node.js 网关先校验凭据，再转发到固定 v0.1.4 Rust 后端；VLESS 使用 `/`（也接受 `/vless`），Trojan 使用 `/trojan`，两者仅支持 TCP。
+当前部署代码完全位于本目录，包括 `railway-xray/` 子目录，无需引用相邻的独立部署目录。`PROXY_BACKEND=both` 为默认值，在同一个公网端口同时运行两种后端：原有 Node VLESS `/` 保留 TCP/UDP/XUDP，认证网关将 Rust VLESS `/vless` 和 Trojan `/trojan` 转发到固定 v0.1.4 Rust 后端，Rust 两种协议均仅支持 TCP。
 
 | 后端 | 设置 | 协议与范围 |
 |---|---|---|
-| Node（默认） | `PROXY_BACKEND=node` 或省略 | 原有 VLESS-WS TCP/UDP/XUDP |
-| Railway Xray | `PROXY_BACKEND=railway-xray` | 认证 VLESS-WS / Trojan-WS，仅 TCP，订阅设 `udp: false` |
+| 双后端（默认） | `PROXY_BACKEND=both` 或省略 | Node VLESS `/` TCP/UDP/XUDP；Rust VLESS `/vless`、Trojan `/trojan` 仅 TCP |
+| 仅 Node | `PROXY_BACKEND=node` | 原有 VLESS-WS `/` TCP/UDP/XUDP |
+| 仅 Railway Xray | `PROXY_BACKEND=railway-xray` | Rust VLESS `/`（兼容 `/vless`）、Trojan `/trojan`，仅 TCP |
 
-Rust 模式必须显式提供有效的固定 `uuid`；`TROJAN_PASSWORD` 省略时使用该 UUID。默认模式不会启动 Rust 子进程。两种模式均保留 `/:uuid`、`/:uuid/clash`、固定/临时隧道和各自的优选 IP 节点。切换后端后重新导入订阅即可取得对应协议配置。
+`both` 和 `railway-xray` 模式必须显式提供有效的固定 `uuid`；`TROJAN_PASSWORD` 省略时使用该 UUID。只有显式 `node` 模式不启动 Rust 子进程。三种模式均保留 `/:uuid`、`/:uuid/clash`、固定/临时隧道和各自的优选 IP 节点。切换后端后重新导入订阅即可取得对应协议配置。
+
+**已有 Railway 服务若显式设置了 `PROXY_BACKEND=node` 或 `PROXY_BACKEND=railway-xray`，需要将其改为 `both`，或删除该变量后重新部署，才会使用新的双后端默认值。** Railway 已有变量会覆盖镜像默认设置。双后端比仅 Node 多一个 Rust 后端进程；Rust 启动失败时服务会退出，不会悄悄只留下其中一种后端。
 
 ### 与现有方案对比
 
@@ -36,7 +39,7 @@ Rust 模式必须显式提供有效的固定 `uuid`；`TROJAN_PASSWORD` 省略�
 | **月成本估算** | ~$3 | ~$3.5 | **~$1.60 ~ $3.50** | ~$6+ |
 | **CDN 优选 IP** | ❌ | ✅ 支持 | ✅ **双节点同时支持优选 IP** | ✅ 支持 |
 
-### 架构图（默认模式最多 3 个服务进程，Rust 模式另加 1 个后端）
+### 架构图（默认双后端最多 4 个服务进程，仅 Node 最多 3 个）
 
 ```mermaid
 flowchart TD
@@ -52,8 +55,8 @@ flowchart TD
         direction TB
         CFFixed["cloudflared<br/>（固定隧道进程）"]
         CFTmp["cloudflared<br/>（临时隧道进程）"]
-        Node["Node.js 网关（PORT）<br/>· 凭据校验 / 默认 VLESS 处理<br/>· 节点链接与 Clash 订阅"]
-        Rust["可选 Rust 后端（BACKEND_PORT）<br/>仅 railway-xray 模式启动"]
+        Node["Node.js 网关（PORT）<br/>· Node VLESS / 与 Rust 认证分发<br/>· 节点链接与 Clash 订阅"]
+        Rust["Rust 后端（BACKEND_PORT）<br/>both / railway-xray 模式启动"]
         CFFixed -->|"③ localhost:8080<br/>HTTP / WebSocket"| Node
         CFTmp -->|"③ localhost:8080<br/>HTTP / WebSocket"| Node
         Node -->|"认证后内部 WebSocket"| Rust
@@ -65,8 +68,8 @@ flowchart TD
     Client -->|"① 443 / TLS"| TmpEntry
     FixedEntry -->|"② 双隧道长连接（cloudflared 主动出站）"| CFFixed
     TmpEntry -->|"② 双隧道长连接（cloudflared 主动出站）"| CFTmp
-    Node -->|"默认模式 TCP / UDP"| Target
-    Rust -->|"Rust 模式 TCP"| Target
+    Node -->|"Node VLESS TCP / UDP"| Target
+    Rust -->|"Rust VLESS / Trojan TCP"| Target
 
     classDef client fill:#e0f2fe,stroke:#0284c7,stroke-width:2px,color:#0c4a6e
     classDef cdn fill:#fef3c7,stroke:#d97706,stroke-width:2px,color:#78350f
@@ -94,7 +97,7 @@ flowchart TD
 | 出站流量 | $0.10/GB | 每月含 100GB 免费 |
 | 磁盘 | $0.000231/GB/分钟 | 含 1GB 免费 |
 
-### 默认 Node 模式资源占用（历史估算）
+### 仅 Node 模式资源占用（历史估算）
 
 以下资源与成本数字来自原 Node 模式的估算，未覆盖新增 Rust 进程，也不代表当前 Railway 报价或本次测量结果；实际用量请查看账户面板。
 
@@ -123,7 +126,7 @@ flowchart TD
 | 模式 | 环境变量 | 说明 | 特点 |
 |---|---|---|---|
 | **仅临时隧道** | 只需设置 `uuid` | 只启动 1 个 cloudflared 进程，自动分配 `*.trycloudflare.com` | 免配置 Cloudflare 域名，适合快速试用（重启会变域名） |
-| **双隧道并行** *(推荐)* | 设置 `uuid` + `CLOUDFLARE_TUNNEL_TOKEN` + `CLOUDFLARE_TUNNEL_DOMAIN` | 同时启动固定隧道和临时隧道，生成两个节点 | **固定节点作主用，临时节点作备用**，配合 Clash 自动回退，域名失效秒切 |
+| **双隧道并行** *(推荐)* | 设置 `uuid` + `CLOUDFLARE_TUNNEL_TOKEN` + `CLOUDFLARE_TUNNEL_DOMAIN` | 同时启动固定隧道和临时隧道，生成两组节点 | **固定节点作主用，临时节点作备用**，配合 Clash 自动回退，域名失效秒切 |
 
 ---
 
@@ -201,7 +204,7 @@ git push -u origin main
 ```text
 https://<Cloudflare Tunnel域名>/<你的UUID>
 ```
-将返回纯文本节点导入链接（每行一条）：默认 Node 模式为 `vless://`；Rust 模式同时包含 `vless://` 和 `trojan://`，Trojan 密码会正确编码。
+将返回纯文本节点导入链接（每行一条）：默认 `both` 包含 Node VLESS、Rust VLESS、Trojan 三类节点（`vless://` 和 `trojan://`）。显式 `node` 仅包含原有 VLESS，显式 `railway-xray` 包含 Rust VLESS 与 Trojan。Trojan 密码会正确编码。
 - 包含已就绪的固定隧道节点与临时隧道节点（如 `vless://...`）
 - 若隧道域名尚未就绪，则提示 `⏳ Cloudflare Tunnel 隧道域名尚未就绪，请稍后刷新`
 
@@ -209,10 +212,18 @@ https://<Cloudflare Tunnel域名>/<你的UUID>
 
 | Endpoint | 类型 | 说明 |
 |---|---|---|
-| `GET /:uuid` | **节点链接** | 默认返回 VLESS；Rust 模式返回 VLESS 和 Trojan，每行一条 |
+| `GET /:uuid` | **节点链接** | 默认返回 Node VLESS、Rust VLESS、Trojan，每行一条 |
 | `GET /:uuid/clash` | **Clash / Mihomo YAML** | 返回符合 Mihomo / Clash 规范的完整 YAML 订阅 |
 
 启动日志从本地 `/:uuid` 路由读取同一套链接，固定/临时隧道及优选 IP 的 SNI/Host 均使用相应隧道域名。链接、订阅 URL 和启动日志包含凭据，请勿公开。
+
+默认 `both` 的订阅同时提供以下节点，优选 IP 节点在对应名称后追加编号；原有 Node 节点名称不变。
+
+| 节点类别 | 固定 / 临时隧道节点名称 | WebSocket 路径 | 订阅 UDP |
+|---|---|---|---|
+| Node VLESS | `Cloudflare-Tunnel-Fixed` / `Cloudflare-Tunnel-Tmp` | `/` | `true` |
+| Rust VLESS | `Cloudflare-Tunnel-Xray-Fixed` / `Cloudflare-Tunnel-Xray-Tmp` | `/vless` | `false` |
+| Trojan | `Cloudflare-Tunnel-Trojan-Fixed` / `Cloudflare-Tunnel-Trojan-Tmp` | `/trojan` | `false` |
 
 ---
 
@@ -235,7 +246,7 @@ https://<Cloudflare Tunnel域名>/<你的UUID>/clash
    - 采用 `url-test` 自动测速，始终选用延迟最低的 IP。
    - 以**组引用**形式加入 `Proxy-Select` 可选列表（成员节点不直接进入主组，也不进 `Auto-Fallback`），在 `Proxy-Select` 中选中 `cf-ip` 即可切换使用。
 3. **完整 DNS 配置**：内置 `fake-ip` 模式及国内 DNS 分流，防止 DNS 污染。
-4. **智能分流规则**：内置国内域名/IP 直连规则，境外流量走 VLESS 节点。
+4. **智能分流规则**：内置国内域名/IP 直连规则，境外流量走所选代理节点。
 
 ---
 
@@ -243,9 +254,9 @@ https://<Cloudflare Tunnel域名>/<你的UUID>/clash
 
 | 变量 | 必填 | 默认值 | 说明 |
 |---|---|---|---|
-| `uuid` | 两种模式均应设置；Rust 强制必填 | Rust 无默认值 | 节点 UUID，**务必生成固定值**；Node 保留旧回退仅用于兼容 |
-| `PROXY_BACKEND` | 否 | `node` | `node` 或 `railway-xray`；Rust 模式明确要求有效 UUID |
-| `TROJAN_PASSWORD` | 否 | `uuid` | Rust 模式的 Trojan 密码，可单独设置 |
+| `uuid` | 所有模式均应设置；`both` / `railway-xray` 强制必填 | 双后端 / Rust 无默认值 | 节点 UUID，**务必生成固定值**；仅 Node 保留旧回退用于兼容 |
+| `PROXY_BACKEND` | 否 | `both` | `both`、`node` 或 `railway-xray` |
+| `TROJAN_PASSWORD` | 否 | `uuid` | `both` / `railway-xray` 的 Trojan 密码，可单独设置 |
 | `BACKEND_PORT` | 否 | `3001` | Rust 内部端口，必须与 `PORT` 不同，禁止公开 |
 | `CLOUDFLARE_TUNNEL_TOKEN` | 否（双隧道必填）| 空 | Cloudflare Zero Trust 隧道 Token |
 | `CLOUDFLARE_TUNNEL_DOMAIN` | 否（双隧道必填）| 空 | 固定隧道自定义域名 |
@@ -262,13 +273,13 @@ https://<Cloudflare Tunnel域名>/<你的UUID>/clash
 
 | 配置项 | 值 |
 |---|---|
-| 协议 | VLESS；Rust 模式也可用 Trojan |
+| 协议 | 默认提供 Node VLESS、Rust VLESS 和 Trojan |
 | 地址 (Address) | Cloudflare Tunnel 域名 或 CF 优选 IP |
 | 端口 (Port) | 443 |
 | 用户 ID / 密码 | VLESS 使用 `uuid`；Trojan 使用 `TROJAN_PASSWORD` 或默认 UUID |
 | 加密方式 | VLESS 使用 none |
 | 传输协议 (Network) | ws |
-| 伪装路径 (Path) | VLESS `/`；Trojan `/trojan` |
+| 伪装路径 (Path) | Node VLESS `/`；Rust VLESS `/vless`（仅 Rust 模式兼容 `/`）；Trojan `/trojan` |
 | 伪装域名 (Host) | Cloudflare Tunnel 域名 |
 | 传输层安全 (TLS) | tls |
 | SNI | Cloudflare Tunnel 域名 |
@@ -285,7 +296,7 @@ https://<Cloudflare Tunnel域名>/<你的UUID>/clash
 2. 请求到达 Cloudflare CDN 边缘节点
 3. Cloudflare 通过 Cloudflare Tunnel 双隧道长连接转发至容器内对应的 cloudflared 进程
 4. cloudflared 将流量解密并转发至本地 Node.js 服务 (localhost:8080)
-5. Node.js 处理节点链接 / 订阅请求（如 `/<uuid>` 或 `/<uuid>/clash`），返回所选后端的纯文本链接或 YAML 配置。默认模式保留原有 VLESS TCP/UDP/XUDP 转发；Rust 模式先验证 VLESS UUID 或 Trojan SHA224、完整 TCP 首包、消息大小和认证时限，再连接内部 Rust 后端。
+5. Node.js 处理节点链接 / 订阅请求（如 `/<uuid>` 或 `/<uuid>/clash`），返回所选后端的纯文本链接或 YAML 配置。默认 `both` 将根路径 VLESS 交给原有 Node TCP/UDP/XUDP 实现；`/vless` 和 `/trojan` 先验证 VLESS UUID 或 Trojan SHA224、完整 TCP 首包、消息大小和认证时限，再连接内部 Rust TCP 后端。所有入口共用一个公网端口。
 
 `GET /` 作为健康检查，Rust 后端不可达时返回 `503`，正常时返回 `200`，不显示凭据。Node 监管 Rust；启动失败、意外退出或监听失败会让服务非零退出。`start.sh` 收到 `SIGTERM`/`SIGINT` 时停止 Node 和两个隧道，Node 负责有界关闭自己的 Rust 子进程。Rust 子进程只获得内部端口、协议路径和最小 PATH，不继承 UUID、密码或 Cloudflare Token。
 ```
@@ -307,7 +318,7 @@ https://<Cloudflare Tunnel域名>/<你的UUID>/clash
 ## 十一、限制与提示
 
 1. **资源额度**：请关注 Railway 账户月度额度使用情况。
-2. **协议范围**：默认 Node 模式保留 VLESS TCP/UDP/XUDP；Rust 模式只开放认证 VLESS/Trojan TCP，不开放 VMess/Shadowsocks，也不承诺上游全部协议兼容。
+2. **协议范围**：默认双后端同时提供原 Node VLESS TCP/UDP/XUDP 和 Rust VLESS/Trojan TCP；Rust 节点的订阅 UDP 明确为 `false`，不开放 VMess/Shadowsocks，也不承诺上游全部协议兼容。
 3. **无 WARP 解锁**：本节点出口流量直连目标站点，不含 WARP 链式代理；流媒体解锁取决于 Railway 节点出口 IP。
 4. **合规提示**：仅供网络技术学习研究与个人合法使用，请遵守相关法律法规及服务提供商条款。
 5. **后端暴露边界**：不要为 `BACKEND_PORT`（默认 `3001`）或其他 Rust 监听端口创建 Railway 公网 target port、TCP Proxy 或 Cloudflare Public Hostname。所有隧道均应指向 Node 的 `PORT`。上游 Rust 实际绑定地址由二进制决定，本包装没有强制只绑定 `127.0.0.1`；可访问容器内部端口的进程或私网服务仍在信任边界内。

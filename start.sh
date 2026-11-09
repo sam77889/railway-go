@@ -3,7 +3,7 @@
 
 umask 077
 PORT=${PORT:-8080}
-PROXY_BACKEND=${PROXY_BACKEND:-node}
+PROXY_BACKEND=${PROXY_BACKEND:-both}
 NODE_NAME=${NAME:-cloudflare_tunnel}
 STATE_DIR=${TUNNEL_STATE_DIR:-/tmp}
 NODE_PID=""
@@ -56,13 +56,13 @@ node_alive() {
 
 case "$PROXY_BACKEND" in
     node) UUID=${uuid:-79411d85-b0dc-4cd2-b46c-01789a18c650} ;;
-    railway-xray)
+    both|railway-xray)
         UUID=$(node -e 'const value=(process.env.uuid||"").toLowerCase(); if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value))process.exit(1); process.stdout.write(value)') || {
-            echo "[✗] railway-xray 模式必须提供自己的有效 uuid"
+            echo "[✗] $PROXY_BACKEND 模式必须提供自己的有效 uuid"
             exit 1
         }
         ;;
-    *) echo "[✗] PROXY_BACKEND 只支持 node 或 railway-xray"; exit 1 ;;
+    *) echo "[✗] PROXY_BACKEND 只支持 both、node 或 railway-xray"; exit 1 ;;
 esac
 
 RAW_DOMAIN=${CLOUDFLARE_TUNNEL_DOMAIN:-}

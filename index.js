@@ -46,17 +46,25 @@ function cachedLookup(host, opts, cb) {
 // ===== 配置 =====
 const NAME = process.env.NAME || 'cloudflare_tunnel';
 const PORT = process.env.PORT || 8080;
-const PROXY_BACKEND = process.env.PROXY_BACKEND || 'node';
-if (!['node', 'railway-xray'].includes(PROXY_BACKEND)) {
-    throw new Error('PROXY_BACKEND must be node or railway-xray');
+const PROXY_BACKEND = process.env.PROXY_BACKEND || 'both';
+if (!['both', 'node', 'railway-xray'].includes(PROXY_BACKEND)) {
+    throw new Error('PROXY_BACKEND must be both, node or railway-xray');
 }
-const rustConfig = PROXY_BACKEND === 'railway-xray' ? readConfig({
+const nodeEnabled = PROXY_BACKEND !== 'railway-xray';
+const rustConfig = PROXY_BACKEND !== 'node' ? readConfig({
     ...process.env, PORT: String(PORT), DOMAIN: '', RAILWAY_PUBLIC_DOMAIN: '',
 }) : null;
 const uuid = rustConfig ? rustConfig.uuid : process.env.uuid || '79411d85-b0dc-4cd2-b46c-01789a18c650';
 const STATE_DIR = process.env.TUNNEL_STATE_DIR || '/tmp';
 // CF_IP 支持逗号分隔的多个优选 IP（每个 IP 生成一个节点）
 const CF_IPS = (process.env.CF_IP || '').split(',').map(s => s.trim()).filter(Boolean);
+const variants = [
+    ...(nodeEnabled ? [{ protocol: 'vless', backend: 'node', wsPath: '/', label: '', linkPrefix: 'Vl' }] : []),
+    ...(rustConfig ? [
+        { protocol: 'vless', backend: 'railway-xray', wsPath: nodeEnabled ? '/vless' : '/', label: nodeEnabled ? 'Xray-' : '', linkPrefix: nodeEnabled ? 'Xray-Vl' : 'Vl' },
+        { protocol: 'trojan', backend: 'railway-xray', wsPath: '/trojan', label: 'Trojan-', linkPrefix: 'Tr' },
+    ] : []),
+];
 
 // ===== 域名获取 =====
 function getFixedDomain() {
@@ -70,8 +78,8 @@ function getTmpDomain() {
 
 // ===== VLESS 链接生成 =====
 // addr 为空时使用隧道域名作为连接地址
-function buildVlessLink(domain, tag, addr) {
-    return `vless://${uuid}@${addr || domain}:443?encryption=none&security=tls&sni=${domain}&fp=chrome&type=ws&host=${domain}&path=%2F#Vl-${tag}-${NAME}`;
+function buildVlessLink(domain, tag, addr, variant) {
+    return `vless://${uuid}@${addr || domain}:443?encryption=none&security=tls&sni=${domain}&fp=chrome&type=ws&host=${domain}&path=${encodeURIComponent(variant.wsPath)}#${variant.linkPrefix}-${tag}-${NAME}`;
 }
 
 function buildTrojanLink(domain, tag, addr) {
@@ -89,28 +97,24 @@ function getAllLinks() {
     const links = [];
     const fixed = getFixedDomain();
     const tmp = getTmpDomain();
-    // 始终保留隧道域名节点，优选 IP 节点追加在后
-    if (fixed) {
-        links.push(buildVlessLink(fixed, 'fixed', null));
-        CF_IPS.forEach((a, i) => links.push(buildVlessLink(fixed, `fixed-${i + 1}`, a)));
-    }
-    if (tmp) {
-        links.push(buildVlessLink(tmp, 'tmp', null));
-        CF_IPS.forEach((a, i) => links.push(buildVlessLink(tmp, `tmp-${i + 1}`, a)));
-    }
-    if (rustConfig) {
+    // 每个后端保留隧道域名节点，再追加各优选 IP，节点名称互不重复。
+    for (const variant of variants) {
+        const build = (domain, tag, addr) => variant.protocol === 'trojan'
+            ? buildTrojanLink(domain, tag, addr)
+            : buildVlessLink(domain, tag, addr, variant);
         for (const [domain, tag] of [[fixed, 'fixed'], [tmp, 'tmp']]) {
             if (!domain) continue;
-            links.push(buildTrojanLink(domain, tag, null));
-            CF_IPS.forEach((a, i) => links.push(buildTrojanLink(domain, `${tag}-${i + 1}`, a)));
+            links.push(build(domain, tag, null));
+            CF_IPS.forEach((a, i) => links.push(build(domain, `${tag}-${i + 1}`, a)));
         }
     }
     return links;
 }
 
 // ===== Clash YAML 生成 =====
-function buildClashProxy(name, domain, addr, protocol = 'vless') {
+function buildClashProxy(name, domain, addr, variant) {
     const server = addr || domain;
+    const protocol = variant.protocol;
     return [
         `  - name: ${name}`,
         `    type: ${protocol}`,
@@ -119,11 +123,11 @@ function buildClashProxy(name, domain, addr, protocol = 'vless') {
         protocol === 'trojan' ? `    password: ${JSON.stringify(rustConfig.trojanPassword)}` : `    uuid: ${uuid}`,
         `    network: ws`,
         `    tls: true`,
-        `    udp: ${!rustConfig}`,
+        `    udp: ${variant.backend === 'node'}`,
         `    servername: ${domain}`,
         `    client-fingerprint: chrome`,
         `    ws-opts:`,
-        `      path: ${protocol === 'trojan' ? '"/trojan"' : '"/"'}`,
+        `      path: ${JSON.stringify(variant.wsPath)}`,
         `      headers:`,
         `        Host: ${domain}`,
     ].join('\n');
@@ -138,13 +142,13 @@ function buildClashYaml() {
 
     for (const [domain, label] of [[fixed, 'Fixed'], [tmp, 'Tmp']]) {
         if (!domain) continue;
-        for (const protocol of rustConfig ? ['vless', 'trojan'] : ['vless']) {
-            const baseName = `Cloudflare-Tunnel-${protocol === 'trojan' ? 'Trojan-' : ''}${label}`;
-            proxies.push(buildClashProxy(baseName, domain, null, protocol));
+        for (const variant of variants) {
+            const baseName = `Cloudflare-Tunnel-${variant.label}${label}`;
+            proxies.push(buildClashProxy(baseName, domain, null, variant));
             domainNames.push(baseName);
             CF_IPS.forEach((address, i) => {
                 const name = `${baseName}-${i + 1}`;
-                proxies.push(buildClashProxy(name, domain, address, protocol));
+                proxies.push(buildClashProxy(name, domain, address, variant));
                 cfIpNames.push(name);
             });
         }
@@ -347,7 +351,13 @@ const requestHandler = (req, res) => {
     res.end('404 Not Found');
 };
 
-const gateway = rustConfig ? createGateway(rustConfig, { requestHandler, vlessRoot: true }) : null;
+const gateway = rustConfig ? createGateway(rustConfig, {
+    requestHandler,
+    vlessRoot: !nodeEnabled,
+    rootUpgrade: nodeEnabled ? (req, socket, head) => {
+        wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req));
+    } : undefined,
+}) : null;
 const server = gateway ? gateway.server : http.createServer({ noDelay: true }, requestHandler);
 let backend;
 let stopping = false;
@@ -357,12 +367,13 @@ async function shutdown(code) {
     stopping = true;
     const deadline = setTimeout(() => process.exit(code), 6000);
     try {
+        if (wss) for (const client of wss.clients) client.terminate();
         await Promise.all([
             gateway ? gateway.close() : new Promise(resolve => {
-                for (const client of wss.clients) client.terminate();
                 server.closeAllConnections();
                 server.close(resolve);
             }),
+            wss ? new Promise(resolve => wss.close(resolve)) : Promise.resolve(),
             backend ? backend.stop() : Promise.resolve(),
         ]);
         clearTimeout(deadline);
@@ -393,11 +404,11 @@ server.listen(PORT, () => {
 // ===== WebSocket VLESS 协议处理 =====
 // perMessageDeflate 关闭：VLESS 帧是已加密的二进制，压缩只耗 CPU 不省带宽
 // maxPayload 收紧：VLESS 单帧无需 100MB 默认值，降低恶意大帧的内存占用
-const wss = rustConfig ? null : new WSServer({
-    server,
+const wss = nodeEnabled ? new WSServer({
+    ...(gateway ? { noServer: true } : { server }),
     perMessageDeflate: false,
     maxPayload: 16 * 1024 * 1024,
-});
+}) : null;
 const uuidkey = uuid.replace(/-/g, '');
 
 if (wss) wss.on('connection', ws => {
