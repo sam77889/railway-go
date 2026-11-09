@@ -1,217 +1,198 @@
 #!/bin/sh
-# ============================================================
-# Railway Cloudflare Tunnel VLESS-WS 启动脚本（双隧道版）
-#
-# 进程模型：
-#   1. Node.js VLESS-WS 服务（localhost:PORT）
-#   2. cloudflared ①：固定隧道（如设 CLOUDFLARE_TUNNEL_TOKEN）
-#   3. cloudflared ②：临时隧道（始终启动）
-#
-# 域名文件：
-#   /tmp/cloudflare_tunnel_domain_fixed — 固定隧道域名（来自 CLOUDFLARE_TUNNEL_DOMAIN 环境变量）
-#   /tmp/cloudflare_tunnel_domain_tmp   — 临时隧道域名（从 cloudflared 日志解析）
-# ============================================================
+# Node supervises the optional Rust backend; this script supervises Node and tunnels.
 
+umask 077
 PORT=${PORT:-8080}
-UUID=${uuid:-79411d85-b0dc-4cd2-b46c-01789a18c650}
+PROXY_BACKEND=${PROXY_BACKEND:-node}
 NODE_NAME=${NAME:-cloudflare_tunnel}
+STATE_DIR=${TUNNEL_STATE_DIR:-/tmp}
+NODE_PID=""
+CF_FIXED_PID=""
+CF_TMP_PID=""
+SLEEP_PID=""
+STATE_READY=0
+
+cleanup() {
+    trap - EXIT
+    trap '' INT TERM
+    for PID in "$NODE_PID" "$CF_FIXED_PID" "$CF_TMP_PID" "$SLEEP_PID"; do
+        [ -z "$PID" ] || kill -TERM "$PID" 2>/dev/null || :
+    done
+    # Give Node enough time to perform its own five-second Rust shutdown.
+    COUNT=0
+    while [ "$COUNT" -lt 6 ]; do
+        ALIVE=""
+        for PID in "$NODE_PID" "$CF_FIXED_PID" "$CF_TMP_PID" "$SLEEP_PID"; do
+            if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then ALIVE=1; fi
+        done
+        [ -n "$ALIVE" ] || break
+        sleep 1
+        COUNT=$((COUNT + 1))
+    done
+    for PID in "$NODE_PID" "$CF_FIXED_PID" "$CF_TMP_PID" "$SLEEP_PID"; do
+        [ -z "$PID" ] || kill -KILL "$PID" 2>/dev/null || :
+        [ -z "$PID" ] || wait "$PID" 2>/dev/null || :
+    done
+    if [ "$STATE_READY" = 1 ]; then
+        rm -f "$STATE_DIR/cloudflare_tunnel_domain_fixed" "$STATE_DIR/cloudflare_tunnel_domain_tmp"
+    fi
+}
+trap cleanup EXIT
+trap 'exit 0' INT TERM
+
+pause() {
+    sleep "$1" &
+    SLEEP_PID=$!
+    wait "$SLEEP_PID" 2>/dev/null || :
+    SLEEP_PID=""
+}
+
+node_alive() {
+    if ! kill -0 "$NODE_PID" 2>/dev/null; then
+        echo "[✗] Node.js 进程退出，容器将重启"
+        exit 1
+    fi
+}
+
+case "$PROXY_BACKEND" in
+    node) UUID=${uuid:-79411d85-b0dc-4cd2-b46c-01789a18c650} ;;
+    railway-xray)
+        UUID=$(node -e 'const value=(process.env.uuid||"").toLowerCase(); if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value))process.exit(1); process.stdout.write(value)') || {
+            echo "[✗] railway-xray 模式必须提供自己的有效 uuid"
+            exit 1
+        }
+        ;;
+    *) echo "[✗] PROXY_BACKEND 只支持 node 或 railway-xray"; exit 1 ;;
+esac
+
 RAW_DOMAIN=${CLOUDFLARE_TUNNEL_DOMAIN:-}
 RAW_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN:-}
-
-# 1. 域名净化：去前缀去后缀
-CLEAN_DOMAIN=$(echo "$RAW_DOMAIN" | sed -E 's|^https?://||' | sed -E 's|/+$||')
-
-# 2. Token 智能提取：自动寻找 eyJh 开头的 base64 字符串
-CLEAN_TOKEN=$(echo "$RAW_TOKEN" | grep -oE 'eyJh[a-zA-Z0-9=_-]+' | head -n1)
-
-# 3. 单变量拆分：如果没单独填域名，尝试从 RAW_TOKEN 中提取剩余内容作为域名
+clean_domain() {
+    printf '%s\n' "$1" | sed -E 's|^[[:space:]]+||; s|[[:space:]]+$||; s|^https?://||; s|/+$||'
+}
+CLEAN_DOMAIN=$(clean_domain "$RAW_DOMAIN")
+CLEAN_TOKEN=$(printf '%s\n' "$RAW_TOKEN" | grep -oE 'eyJh[a-zA-Z0-9=_-]+' | head -n1)
 if [ -z "$CLEAN_DOMAIN" ] && [ -n "$CLEAN_TOKEN" ]; then
-    POSSIBLE_DOMAIN=$(echo "$RAW_TOKEN" | sed -E "s|${CLEAN_TOKEN}||g" | sed -E "s|cloudflared(\.exe)?\s+service\s+install||gi" | tr -d ' ,|')
-    if [ -n "$POSSIBLE_DOMAIN" ]; then
-        CLEAN_DOMAIN=$(echo "$POSSIBLE_DOMAIN" | sed -E 's|^https?://||' | sed -E 's|/+$||')
-    fi
+    POSSIBLE_DOMAIN=$(printf '%s\n' "$RAW_TOKEN" | sed -E "s|${CLEAN_TOKEN}||g; s|cloudflared(\.exe)?[[:space:]]+service[[:space:]]+install||gi" | tr -d ' ,|')
+    CLEAN_DOMAIN=$(clean_domain "$POSSIBLE_DOMAIN")
 fi
 
-CLOUDFLARE_TUNNEL_DOMAIN="$CLEAN_DOMAIN"
-CLOUDFLARE_TUNNEL_TOKEN="$CLEAN_TOKEN"
+uuid=$UUID
+NAME=$NODE_NAME
+BACKEND_PORT=${BACKEND_PORT:-3001}
+CLOUDFLARE_TUNNEL_DOMAIN=$CLEAN_DOMAIN
+CLOUDFLARE_TUNNEL_TOKEN=$CLEAN_TOKEN
+TUNNEL_STATE_DIR=$STATE_DIR
+export uuid PORT NAME PROXY_BACKEND BACKEND_PORT
+export CLOUDFLARE_TUNNEL_DOMAIN CLOUDFLARE_TUNNEL_TOKEN TUNNEL_STATE_DIR
 
-# 优选 IP 解析：环境变量 CF_IP 优先；未设置时自动从仓库 result.csv 提取延迟最低的 5 个
+if ! mkdir -p "$STATE_DIR" || ! rm -f "$STATE_DIR/cloudflare_tunnel_domain_fixed" "$STATE_DIR/cloudflare_tunnel_domain_tmp"; then
+    echo "[✗] 无法初始化隧道状态目录: $STATE_DIR"
+    exit 1
+fi
+STATE_READY=1
+
 CF_IP=${CF_IP:-}
+CF_IP_FROM="环境变量"
 if [ -z "$CF_IP" ]; then
     SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
     if [ -f "$SCRIPT_DIR/result.csv" ]; then
         CF_IP=$(awk -F, 'NR>1 && ($4+0)==0 && ($6+0)>0 {print ($5+0), $1}' "$SCRIPT_DIR/result.csv" | sort -n | head -n 5 | awk '{ips = ips (ips ? "," : "") $2} END {print ips}')
         CF_IP_FROM="result.csv"
     fi
-else
-    CF_IP_FROM="环境变量"
 fi
 export CF_IP
 
 echo ""
-echo "╔══════════════════════════════════════════════╗"
-echo "║   Railway Cloudflare Tunnel VLESS-WS 轻量节点（双隧道）   ║"
-echo "╚══════════════════════════════════════════════╝"
-echo ""
-echo "  UUID:     ${UUID}"
-echo "  端口:     ${PORT}"
-echo "  节点名:   ${NODE_NAME}"
-if [ -n "$CF_IP" ]; then
-    echo "  优选 IP:  ${CF_IP}（来源: ${CF_IP_FROM}）"
-fi
-echo ""
+echo "Railway Cloudflare Tunnel 双隧道节点"
+echo "  后端: $PROXY_BACKEND"
+echo "  端口: $PORT"
+echo "  节点名: $NAME"
+if [ -n "$CF_IP" ]; then echo "  优选 IP: $CF_IP（来源: $CF_IP_FROM）"; fi
 
-# ── 1. 启动 Node.js VLESS-WS 服务 ──
 node index.js &
 NODE_PID=$!
-sleep 1
+pause 1
+node_alive
+echo "[✓] Node.js 网关已启动 (PID: $NODE_PID)"
 
-if ! kill -0 "$NODE_PID" 2>/dev/null; then
-    echo "[✗] Node.js 启动失败，退出"
-    exit 1
-fi
-echo "[✓] Node.js VLESS-WS 服务已启动 (PID: ${NODE_PID})"
-
-# ── 2. 启动固定隧道（如设 CLOUDFLARE_TUNNEL_TOKEN 且解析出 CLOUDFLARE_TUNNEL_DOMAIN）──
-CF_FIXED_PID=""
 if [ -n "$CLOUDFLARE_TUNNEL_TOKEN" ] && [ -n "$CLOUDFLARE_TUNNEL_DOMAIN" ]; then
-    echo ""
-    echo "┌─ 固定隧道 ────────────────────────────────┐"
-    echo "│  域名: ${CLOUDFLARE_TUNNEL_DOMAIN}"
-    echo "└────────────────────────────────────────────┘"
-
-    echo "$CLOUDFLARE_TUNNEL_DOMAIN" > /tmp/cloudflare_tunnel_domain_fixed
-
-    # Token 格式预检：合法 Token 是 base64url 编码的 JSON（应含 a/t/s 三个字段）
-    TOKEN_CHECK=$(node -e "try{const j=JSON.parse(Buffer.from(process.argv[1].replace(/-/g,'+').replace(/_/g,'/'),'base64').toString());console.log(j.a&&j.t&&j.s?'OK':'字段缺失')}catch(e){console.log('无法解析')}" "$CLOUDFLARE_TUNNEL_TOKEN")
-    if [ "$TOKEN_CHECK" != "OK" ]; then
-        echo "[!] 警告：CLOUDFLARE_TUNNEL_TOKEN 格式异常（${TOKEN_CHECK}），可能复制不完整或隧道已重建"
-    fi
-
-    # 注意：--no-autoupdate 是 tunnel 命令级选项，必须放在 run 子命令之前
-    cloudflared tunnel \
-        --no-autoupdate \
-        run \
-        --token "$CLOUDFLARE_TUNNEL_TOKEN" \
-        > /tmp/cloudflare_tunnel_fixed.log 2>&1 &
+    printf '%s\n' "$CLOUDFLARE_TUNNEL_DOMAIN" > "$STATE_DIR/cloudflare_tunnel_domain_fixed" || exit 1
+    TOKEN_CHECK=$(node -e 'try{const value=JSON.parse(Buffer.from(process.env.CLOUDFLARE_TUNNEL_TOKEN,"base64url").toString());console.log(value.a&&value.t&&value.s?"OK":"字段缺失")}catch{console.log("无法解析")}')
+    if [ "$TOKEN_CHECK" != "OK" ]; then echo "[!] 固定隧道 Token 格式异常（$TOKEN_CHECK）"; fi
+    cloudflared tunnel --no-autoupdate run --token "$CLOUDFLARE_TUNNEL_TOKEN" \
+        > "$STATE_DIR/cloudflare_tunnel_fixed.log" 2>&1 &
     CF_FIXED_PID=$!
-
-    sleep 5
+    pause 5
+    node_alive
     if kill -0 "$CF_FIXED_PID" 2>/dev/null; then
-        echo "[✓] 固定隧道已启动 (PID: ${CF_FIXED_PID})"
+        echo "[✓] 固定隧道进程已启动 (PID: $CF_FIXED_PID)，域名: $CLOUDFLARE_TUNNEL_DOMAIN"
     else
-        echo "[✗] 固定隧道启动失败，cloudflared 错误详情："
-        echo "────────────────────────────────────────────"
-        tail -n 20 /tmp/cloudflare_tunnel_fixed.log 2>/dev/null
-        echo "────────────────────────────────────────────"
-        echo "[i] 常见原因：Token 无效 / 隧道被删除或重建 / Token 复制不完整"
+        echo "[✗] 固定隧道启动失败："
+        tail -n 20 "$STATE_DIR/cloudflare_tunnel_fixed.log" 2>/dev/null
+        wait "$CF_FIXED_PID" 2>/dev/null || :
         CF_FIXED_PID=""
     fi
 else
-    echo "[i] 未设 CLOUDFLARE_TUNNEL_TOKEN，跳过固定隧道"
+    echo "[i] 固定隧道 Token/域名未同时设置，使用临时隧道"
 fi
 
-# ── 3. 启动临时隧道（始终启动）──
-echo ""
-echo "┌─ 临时隧道 ────────────────────────────────┐"
-echo "│  等待 cloudflared 分配域名...              │"
-echo "└────────────────────────────────────────────┘"
-
-cloudflared tunnel \
-    --url "http://localhost:${PORT}" \
-    --no-autoupdate \
-    > /tmp/cloudflare_tunnel_tmp.log 2>&1 &
+cloudflared tunnel --url "http://localhost:$PORT" --no-autoupdate \
+    > "$STATE_DIR/cloudflare_tunnel_tmp.log" 2>&1 &
 CF_TMP_PID=$!
-
-# 等待并解析临时隧道域名（最多 30 秒）
 TMP_DOMAIN=""
-i=0
-while [ $i -lt 30 ]; do
-    TMP_DOMAIN=$(grep -oE 'https://[a-zA-Z0-9_-]+\.trycloudflare\.com' /tmp/cloudflare_tunnel_tmp.log 2>/dev/null | head -1 | sed 's|https://||')
-    if [ -n "$TMP_DOMAIN" ]; then
-        break
-    fi
-    sleep 1
-    i=$((i + 1))
+COUNT=0
+while [ "$COUNT" -lt 30 ]; do
+    node_alive
+    TMP_DOMAIN=$(grep -oE 'https://[a-zA-Z0-9_-]+\.trycloudflare\.com' "$STATE_DIR/cloudflare_tunnel_tmp.log" 2>/dev/null | head -n1 | sed 's|https://||')
+    [ -z "$TMP_DOMAIN" ] || break
+    kill -0 "$CF_TMP_PID" 2>/dev/null || break
+    pause 1
+    COUNT=$((COUNT + 1))
 done
-
 if [ -n "$TMP_DOMAIN" ]; then
-    echo "$TMP_DOMAIN" > /tmp/cloudflare_tunnel_domain_tmp
-    echo "[✓] 临时隧道已启动 (PID: ${CF_TMP_PID})"
-    echo "    域名: ${TMP_DOMAIN}"
+    printf '%s\n' "$TMP_DOMAIN" > "$STATE_DIR/cloudflare_tunnel_domain_tmp" || exit 1
+    echo "[✓] 临时隧道进程已启动 (PID: $CF_TMP_PID)，域名: $TMP_DOMAIN"
 else
-    echo "[!] 30 秒内未获取到临时隧道域名，cloudflared 错误详情："
-    echo "────────────────────────────────────────────"
-    tail -n 20 /tmp/cloudflare_tunnel_tmp.log 2>/dev/null
-    echo "────────────────────────────────────────────"
+    echo "[!] 未获取到临时隧道域名："
+    tail -n 20 "$STATE_DIR/cloudflare_tunnel_tmp.log" 2>/dev/null
 fi
 
-# ── 4. 输出节点信息 ──
+# Let the HTTP server generate all protocol/domain/IP links and escape passwords.
 echo ""
-echo "╔══════════════════════════════════════════════╗"
-echo "║   ✅ 部署成功                                ║"
-echo "╚══════════════════════════════════════════════╝"
-echo ""
+echo "── 节点链接（含凭据，请勿公开日志）──"
+node <<'NODE'
+const http = require('node:http');
+const request = http.get({ host: '127.0.0.1', port: process.env.PORT, path: `/${process.env.uuid}`, agent: false }, response => {
+    response.setEncoding('utf8');
+    response.on('data', chunk => process.stdout.write(chunk));
+    response.on('end', () => { if (response.statusCode !== 200) process.exitCode = 1; });
+});
+request.setTimeout(3000, () => request.destroy(new Error('本地链接请求超时')));
+request.on('error', error => { console.error(`[!] ${error.message}`); process.exitCode = 1; });
+NODE
 
-# 输出节点链接：$1=隧道域名 $2=标签(fixed/tmp)；先输出域名节点，再为每个优选 IP 输出一条
-print_links() {
-    PL_DOMAIN="$1"
-    PL_TAG="$2"
-    echo "  链接: vless://${UUID}@${PL_DOMAIN}:443?encryption=none&security=tls&sni=${PL_DOMAIN}&fp=chrome&type=ws&host=${PL_DOMAIN}&path=%2F#Vl-${PL_TAG}-${NODE_NAME}"
-    if [ -n "$CF_IP" ]; then
-        PL_IDX=0
-        echo "$CF_IP" | tr ',' '\n' | while read -r PL_IP; do
-            PL_IP=$(echo "$PL_IP" | tr -d ' ')
-            [ -z "$PL_IP" ] && continue
-            PL_IDX=$((PL_IDX + 1))
-            echo "  链接: vless://${UUID}@${PL_IP}:443?encryption=none&security=tls&sni=${PL_DOMAIN}&fp=chrome&type=ws&host=${PL_DOMAIN}&path=%2F#Vl-${PL_TAG}-${PL_IDX}-${NODE_NAME}"
-        done
-    fi
-}
-
-# 固定隧道节点
-if [ -n "$CLOUDFLARE_TUNNEL_DOMAIN" ] && [ -n "$CF_FIXED_PID" ]; then
-    echo "  ── 固定隧道 ──"
-    echo "  域名: ${CLOUDFLARE_TUNNEL_DOMAIN}"
-    print_links "$CLOUDFLARE_TUNNEL_DOMAIN" "fixed"
-    echo ""
-fi
-
-# 临时隧道节点
-if [ -n "$TMP_DOMAIN" ]; then
-    echo "  ── 临时隧道 ──"
-    echo "  域名: ${TMP_DOMAIN}"
-    print_links "$TMP_DOMAIN" "tmp"
-    echo ""
-fi
-
-# 订阅地址
-SUB_DOMAIN=${CLOUDFLARE_TUNNEL_DOMAIN:-$TMP_DOMAIN}
+SUB_DOMAIN=$TMP_DOMAIN
+if [ -n "$CF_FIXED_PID" ]; then SUB_DOMAIN=$CLOUDFLARE_TUNNEL_DOMAIN; fi
 if [ -n "$SUB_DOMAIN" ]; then
-    echo "  ── 订阅地址 ──"
-    echo "  vless 链接: https://${SUB_DOMAIN}/${UUID}"
-    echo "  Clash 配置: https://${SUB_DOMAIN}/${UUID}/clash"
-    echo ""
+    echo "  节点链接: https://$SUB_DOMAIN/$UUID"
+    echo "  Clash 配置: https://$SUB_DOMAIN/$UUID/clash"
 fi
-echo "══════════════════════════════════════════════"
+echo "[i] 本地启动检查完成；公网可达性请通过客户端验证。"
 
-# ── 5. 等待进程 ──
-# Node.js 是生命线：它退出则容器退出
-# cloudflared 退出只打告警（降级为单隧道）
 while true; do
-    if ! kill -0 "$NODE_PID" 2>/dev/null; then
-        echo "[✗] Node.js 进程退出，容器将重启"
-        exit 1
-    fi
+    node_alive
     if [ -n "$CF_FIXED_PID" ] && ! kill -0 "$CF_FIXED_PID" 2>/dev/null; then
-        echo "[!] 固定隧道进程退出（降级为临时隧道），退出前日志："
-        tail -n 10 /tmp/cloudflare_tunnel_fixed.log 2>/dev/null
+        echo "[!] 固定隧道退出，保留临时隧道"
+        tail -n 10 "$STATE_DIR/cloudflare_tunnel_fixed.log" 2>/dev/null
+        wait "$CF_FIXED_PID" 2>/dev/null || :
         CF_FIXED_PID=""
     fi
     if [ -n "$CF_TMP_PID" ] && ! kill -0 "$CF_TMP_PID" 2>/dev/null; then
-        echo "[!] 临时隧道进程退出（降级为固定隧道），退出前日志："
-        tail -n 10 /tmp/cloudflare_tunnel_tmp.log 2>/dev/null
+        echo "[!] 临时隧道退出，保留固定隧道"
+        tail -n 10 "$STATE_DIR/cloudflare_tunnel_tmp.log" 2>/dev/null
+        wait "$CF_TMP_PID" 2>/dev/null || :
         CF_TMP_PID=""
     fi
-    sleep 30
+    pause 1
 done

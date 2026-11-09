@@ -7,7 +7,9 @@
   "license": "MIT",
   "private": true,
   "scripts": {
-    "start": "sh start.sh"
+    "start": "sh start.sh",
+    "test": "node --test",
+    "test:upstream": "sh scripts/verify-upstream.sh"
   },
   "engines": {
     "node": ">=18"

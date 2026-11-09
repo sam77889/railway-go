@@ -1,8 +1,10 @@
-# Railway Cloudflare Tunnel 双隧道节点 — 完整部署操作手册
+# Railway Cloudflare Tunnel 双隧道节点 — Node / Railway Xray 部署手册
 
 > 本文档面向**从未使用过 Railway** 的用户，从零开始，一步一步带你完成部署。
 >
 > 预计耗时：**15 ~ 25 分钟**（含 Cloudflare 隧道配置）
+
+本目录已合并可选的 Railway Xray 后端，部署时只需此 `cloudflare-tunnel/` 目录。默认 `PROXY_BACKEND=node` 保留原有 VLESS TCP/UDP/XUDP；设置 `PROXY_BACKEND=railway-xray` 才启动 Rust，增加 Trojan，且两种协议均只支持 TCP。两种模式共用双隧道、优选 IP、节点链接和 Clash/Mihomo 订阅。本文是部署操作说明；本次未实际构建镜像或部署 Railway。
 
 ---
 
@@ -106,9 +108,13 @@ git push -u origin main
 5. 回到 Railway 页面后，在仓库列表中**点击你的仓库名称**。
 6. Railway 会立即开始构建和部署。
 
+若你提交的是整个工作区，在服务设置中将 **Root Directory** 设为 `/cloudflare-tunnel`，选择 `/cloudflare-tunnel/railway.json` 配置文件；若仓库根目录已是本目录内容，则保持默认。使用 **DOCKERFILE** 构建，文件为 `Dockerfile`。镜像采用 `node:22-bookworm-slim`，包含 cloudflared、glibc 及固定版本且校验 SHA256 的 Rust 二进制，支持 amd64/arm64，以非 root 的 `node` 用户运行。
+
 > **💡 重要：本项目不需要配置 Railway 域名和端口**
 >
 > 与网上其它教程（云桌面/Xray 手动部署类）不同，本方案的流量通过 cloudflared **出站隧道**转发，完全不依赖 Railway 的入站域名。请**不要**在 Settings → Networking 中 Generate Domain 或修改端口——保持默认即可，画蛇添足反而可能导致固定隧道端口失配。
+
+Rust 的 `BACKEND_PORT` 默认 `3001`，必须不同于 Node 的 `PORT`。**严禁**为 `3001` 或任何其他 Rust 监听端口创建 Railway 公网 target port、TCP Proxy 或 Cloudflare Public Hostname；隧道只能指向 Node 网关端口。
 
 ### 4.2 观察构建过程
 
@@ -167,6 +173,12 @@ git push -u origin main
 |---|---|---|
 | `NAME` | `my-node` | 节点名称前缀，不填默认 `cloudflare_tunnel` |
 | `CF_IP` | `108.162.196.94,104.24.146.138` | Cloudflare 优选 IP，逗号分隔多个（每 IP 一个节点）。不填则自动从仓库 `result.csv` 提取前 5 个低延迟 IP |
+| `PROXY_BACKEND` | `node` 或 `railway-xray` | 默认 `node`；选择 Rust 时填 `railway-xray` |
+| `TROJAN_PASSWORD` | `你的独立密码` | Rust 模式可选，未设置时使用 `uuid` |
+| `BACKEND_PORT` | `3001` | Rust 内部端口，不得与 `PORT` 相同或暴露公网 |
+| `TUNNEL_STATE_DIR` | `/tmp` | 可选状态/日志目录，须允许 `node` 用户写入；并行本地实例使用不同目录 |
+
+启用 Rust 模式时，必须提供自己的有效固定 `uuid`，缺失或格式错误会直接启动失败。其 VLESS 路径保留 `/`，也接受 `/vless`；Trojan 路径是 `/trojan`。固定域名、临时域名和各自优选 IP 都会生成两种协议，订阅中的 UDP 为 `false`。需要原有 UDP/XUDP 时使用默认 Node 模式。
 
 ### 5.3 填写容错说明
 
@@ -246,7 +258,7 @@ cloudflared.exe service install eyJhIjoiNGU2ZDc2Y2E3MjZmNTk3NjhhMjNiYTVjMm...
    - 组合起来就是 `proxy.example.com` — 这就是你要填到 `CLOUDFLARE_TUNNEL_DOMAIN` 的值。
 3. **Service**：
    - **Type** 选择 `HTTP`
-   - **URL** 填写 `localhost:8080`
+   - **URL** 填写 `localhost:8080`（默认值；若 Railway 注入的 `PORT` 不同，应使用日志显示的 Node 端口，不要指向 Rust 的 `BACKEND_PORT`）
 4. 点击 **Save tunnel**。
 
 ### 6.5 回到 Railway 填写变量
@@ -269,41 +281,29 @@ cloudflared.exe service install eyJhIjoiNGU2ZDc2Y2E3MjZmNTk3NjhhMjNiYTVjMm...
 3. 在 **Deploy Logs**（部署日志）中，你应该看到类似以下输出：
 
 ```
-╔══════════════════════════════════════════════╗
-║   Railway Cloudflare Tunnel VLESS-WS 轻量节点（双隧道）   ║
-╚══════════════════════════════════════════════╝
-
-  UUID:     xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-  端口:     8080
-  节点名:   cloudflare_tunnel
-
-[✓] Node.js VLESS-WS 服务已启动 (PID: 7)
-
-┌─ 固定隧道 ────────────────────────────────┐
-│  域名: proxy.example.com
-└────────────────────────────────────────────┘
-[✓] 固定隧道已启动 (PID: 13)
-
-┌─ 临时隧道 ────────────────────────────────┐
-│  等待 cloudflared 分配域名...              │
-└────────────────────────────────────────────┘
-[✓] 临时隧道已启动 (PID: 15)
-    域名: xxxx-xxxx-xxxx.trycloudflare.com
-
-╔══════════════════════════════════════════════╗
-║   ✅ 部署成功                                ║
-╚══════════════════════════════════════════════╝
+Railway Cloudflare Tunnel 双隧道节点
+  后端: railway-xray
+  端口: 8080
+  节点名: cloudflare_tunnel
+[✓] Node.js 网关已启动 (PID: 7)
+[✓] 固定隧道进程已启动 (PID: 13)，域名: proxy.example.com
+[✓] 临时隧道进程已启动 (PID: 15)，域名: xxxx-xxxx.trycloudflare.com
+── 节点链接（含凭据，请勿公开日志）──
+（此处为从本地 /uuid 统一取得的导入链接）
+[i] 本地启动检查完成；公网可达性请通过客户端验证。
 ```
 
 ### 7.2 关键检查点
 
 | 日志内容 | 含义 |
 |---|---|
-| `[✓] Node.js VLESS-WS 服务已启动` | 核心代理服务正常 |
-| `[✓] 固定隧道已启动` | Token 有效，固定隧道连接成功 |
-| `[✓] 临时隧道已启动` + 显示 `.trycloudflare.com` 域名 | 备用隧道正常 |
+| `[✓] Node.js 网关已启动` | Node 进程已启动；Rust 模式还应确认健康检查为 200 |
+| `[✓] 固定隧道进程已启动` | cloudflared 进程存活，公网连接仍需客户端验证 |
+| `[✓] 临时隧道进程已启动` + 显示 `.trycloudflare.com` 域名 | 已获取临时域名，公网连接仍需客户端验证 |
 | `[!] 固定隧道启动失败` | Token 无效或过期，请检查 |
-| `[i] 未设 CLOUDFLARE_TUNNEL_TOKEN，跳过固定隧道` | 你没配 Token，正常现象（仅临时隧道模式） |
+| `[i] 固定隧道 Token/域名未同时设置，使用临时隧道` | 仅临时隧道模式 |
+
+`GET /` 是健康检查：Rust 未就绪时返回 `503`，后端可达时为 `200`，不暴露凭据。Node/Rust 启动失败或 Rust 意外退出会使主服务非零退出，交给 Railway 重启。停止服务时，启动脚本清理 Node 和两个隧道，Node 负责停止 Rust。
 
 ---
 
@@ -311,7 +311,7 @@ cloudflared.exe service install eyJhIjoiNGU2ZDc2Y2E3MjZmNTk3NjhhMjNiYTVjMm...
 
 部署成功后，你有两种方式使用节点：
 
-### 8.1 方式一：获取 VLESS 节点链接
+### 8.1 方式一：获取节点链接
 
 在浏览器中访问：
 
@@ -321,7 +321,7 @@ https://<你的CLOUDFLARE_TUNNEL域名>/<你的UUID>
 
 例如：`https://proxy.example.com/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`
 
-页面会返回纯文本的 `vless://` 链接（每行一条）。你可以直接复制到 V2rayN / Nekoray / Shadowrocket 等客户端中导入。
+页面会返回纯文本链接（每行一条）：默认 Node 模式为 `vless://`；Rust 模式同时返回 `vless://` 与 `trojan://`。可以将其导入支持对应协议的客户端。Trojan 密码由统一链接生成器编码，不要手工拼接带特殊字符的密码。链接和订阅 URL 包含凭据，启动日志也会输出这些链接，请勿公开。
 
 ### 8.2 方式二：导入 Clash / Mihomo 订阅（推荐）
 
@@ -402,7 +402,7 @@ https://<你的CLOUDFLARE_TUNNEL域名>/<你的UUID>/clash
 
 ## 十、常见问题排查
 
-### Q1：部署后日志显示 "[✗] Node.js 启动失败"
+### Q1：部署后日志显示 "[✗] Node.js 进程退出" 或 UUID 校验失败
 
 **原因**：通常是 `uuid` 环境变量未设置或格式错误。
 
@@ -463,6 +463,8 @@ cloudflared tunnel run --token <你的Token>
 - 伪装路径（Path）：`/`
 - TLS：`开启`
 - SNI 和 Host：都填 Cloudflare Tunnel 域名
+
+Rust 模式的 Trojan 节点应选择 `Trojan`、密码使用 `TROJAN_PASSWORD`（省略时为 UUID）、Path 使用 `/trojan`；TLS、443、SNI 和 Host 与对应隧道保持一致。Rust 模式不提供 UDP/XUDP、VMess 或 Shadowsocks。
 
 ---
 
@@ -529,3 +531,7 @@ CF 免费 CDN 的物理绕行决定了 ~150ms 起步。追求极致延迟可改�
 ---
 
 > 📝 如有其他问题，请查阅项目主文档 [README.md](./README.md) 获取更多技术细节。
+
+Rust 上游提供闭源二进制，固定 v0.1.4 和 SHA256 校验可确认下载内容一致，仍需信任发布者，不能替代源码审计。它的实际绑定地址由二进制决定，本包装没有将其强制限制为 `127.0.0.1`；可访问容器内监听端口的进程和私网服务处于同一信任边界。Rust 子进程采用环境白名单，不继承 UUID、Trojan 密码或 Cloudflare Token。
+
+本地 `.env.subscription` 不需要上传，也不会被此程序自动读取；`.dockerignore` 排除 `.env` 和 `.env.*`。请把实际部署变量填写到 Railway Variables。测试通过不表示 Docker 镜像已构建或 Railway 已部署；本次 Docker 构建、ARM64、IPv6 和真实 Cloudflare 隧道建连尚未实测。

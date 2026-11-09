@@ -16,24 +16,56 @@ const os = require('os');
 const fs = require('fs');
 const http = require('http');
 const net = require('net');
+const dns = require('dns');
 const dgram = require('dgram');
+const path = require('path');
 const { createWebSocketStream, Server: WSServer } = require('ws');
+const { readConfig, createGateway, checkBackend } = require('./railway-xray/gateway');
+const { startBackend } = require('./railway-xray/backend');
+
+// ===== 出站 DNS 缓存 =====
+// 每条新连接都做一次域名解析会叠加 10-50ms 延迟；缓存 5 分钟内同一域名零解析开销
+const DNS_TTL = 5 * 60 * 1000;
+const dnsCache = new Map(); // host -> { address, family, expires }
+function cachedLookup(host, opts, cb) {
+    if (typeof opts === 'function') { cb = opts; opts = {}; }
+    const hit = dnsCache.get(host);
+    if (hit && hit.expires > Date.now()) {
+        if (opts.all) return process.nextTick(() => cb(null, [{ address: hit.address, family: hit.family }]));
+        return process.nextTick(() => cb(null, hit.address, hit.family));
+    }
+    dns.lookup(host, { all: true }, (err, addrs) => {
+        if (err) return cb(err);
+        const pick = addrs.find(a => a.family === 4) || addrs[0];
+        dnsCache.set(host, { address: pick.address, family: pick.family, expires: Date.now() + DNS_TTL });
+        if (opts.all) return cb(null, [{ address: pick.address, family: pick.family }]);
+        cb(null, pick.address, pick.family);
+    });
+}
 
 // ===== 配置 =====
 const NAME = process.env.NAME || 'cloudflare_tunnel';
 const PORT = process.env.PORT || 8080;
-const uuid = process.env.uuid || '79411d85-b0dc-4cd2-b46c-01789a18c650';
+const PROXY_BACKEND = process.env.PROXY_BACKEND || 'node';
+if (!['node', 'railway-xray'].includes(PROXY_BACKEND)) {
+    throw new Error('PROXY_BACKEND must be node or railway-xray');
+}
+const rustConfig = PROXY_BACKEND === 'railway-xray' ? readConfig({
+    ...process.env, PORT: String(PORT), DOMAIN: '', RAILWAY_PUBLIC_DOMAIN: '',
+}) : null;
+const uuid = rustConfig ? rustConfig.uuid : process.env.uuid || '79411d85-b0dc-4cd2-b46c-01789a18c650';
+const STATE_DIR = process.env.TUNNEL_STATE_DIR || '/tmp';
 // CF_IP 支持逗号分隔的多个优选 IP（每个 IP 生成一个节点）
 const CF_IPS = (process.env.CF_IP || '').split(',').map(s => s.trim()).filter(Boolean);
 
 // ===== 域名获取 =====
 function getFixedDomain() {
     if (process.env.CLOUDFLARE_TUNNEL_DOMAIN) return process.env.CLOUDFLARE_TUNNEL_DOMAIN;
-    try { return fs.readFileSync('/tmp/cloudflare_tunnel_domain_fixed', 'utf8').trim(); } catch { return null; }
+    try { return fs.readFileSync(path.join(STATE_DIR, 'cloudflare_tunnel_domain_fixed'), 'utf8').trim(); } catch { return null; }
 }
 
 function getTmpDomain() {
-    try { return fs.readFileSync('/tmp/cloudflare_tunnel_domain_tmp', 'utf8').trim(); } catch { return null; }
+    try { return fs.readFileSync(path.join(STATE_DIR, 'cloudflare_tunnel_domain_tmp'), 'utf8').trim(); } catch { return null; }
 }
 
 // ===== VLESS 链接生成 =====
@@ -42,7 +74,18 @@ function buildVlessLink(domain, tag, addr) {
     return `vless://${uuid}@${addr || domain}:443?encryption=none&security=tls&sni=${domain}&fp=chrome&type=ws&host=${domain}&path=%2F#Vl-${tag}-${NAME}`;
 }
 
-function getAllVlessLinks() {
+function buildTrojanLink(domain, tag, addr) {
+    const server = addr || domain;
+    const host = net.isIP(server) === 6 ? `[${server}]` : server;
+    const link = new URL(`trojan://${encodeURIComponent(rustConfig.trojanPassword)}@${host}:443`);
+    for (const [key, value] of Object.entries({
+        security: 'tls', sni: domain, fp: 'chrome', type: 'ws', host: domain, path: '/trojan',
+    })) link.searchParams.set(key, value);
+    link.hash = `Tr-${tag}-${NAME}`;
+    return link.href;
+}
+
+function getAllLinks() {
     const links = [];
     const fixed = getFixedDomain();
     const tmp = getTmpDomain();
@@ -55,25 +98,32 @@ function getAllVlessLinks() {
         links.push(buildVlessLink(tmp, 'tmp', null));
         CF_IPS.forEach((a, i) => links.push(buildVlessLink(tmp, `tmp-${i + 1}`, a)));
     }
+    if (rustConfig) {
+        for (const [domain, tag] of [[fixed, 'fixed'], [tmp, 'tmp']]) {
+            if (!domain) continue;
+            links.push(buildTrojanLink(domain, tag, null));
+            CF_IPS.forEach((a, i) => links.push(buildTrojanLink(domain, `${tag}-${i + 1}`, a)));
+        }
+    }
     return links;
 }
 
 // ===== Clash YAML 生成 =====
-function buildClashProxy(name, domain, addr) {
+function buildClashProxy(name, domain, addr, protocol = 'vless') {
     const server = addr || domain;
     return [
         `  - name: ${name}`,
-        `    type: vless`,
+        `    type: ${protocol}`,
         `    server: ${server}`,
         `    port: 443`,
-        `    uuid: ${uuid}`,
+        protocol === 'trojan' ? `    password: ${JSON.stringify(rustConfig.trojanPassword)}` : `    uuid: ${uuid}`,
         `    network: ws`,
         `    tls: true`,
-        `    udp: true`,
+        `    udp: ${!rustConfig}`,
         `    servername: ${domain}`,
         `    client-fingerprint: chrome`,
         `    ws-opts:`,
-        `      path: "/"`,
+        `      path: ${protocol === 'trojan' ? '"/trojan"' : '"/"'}`,
         `      headers:`,
         `        Host: ${domain}`,
     ].join('\n');
@@ -86,23 +136,18 @@ function buildClashYaml() {
     const domainNames = []; // 隧道域名节点：进 Proxy-Select / Auto-Fallback
     const cfIpNames = [];   // 优选 IP 节点：仅进独立代理组 cf-ip
 
-    if (fixed) {
-        proxies.push(buildClashProxy('Cloudflare-Tunnel-Fixed', fixed, null));
-        domainNames.push('Cloudflare-Tunnel-Fixed');
-        CF_IPS.forEach((a, i) => {
-            const name = `Cloudflare-Tunnel-Fixed-${i + 1}`;
-            proxies.push(buildClashProxy(name, fixed, a));
-            cfIpNames.push(name);
-        });
-    }
-    if (tmp) {
-        proxies.push(buildClashProxy('Cloudflare-Tunnel-Tmp', tmp, null));
-        domainNames.push('Cloudflare-Tunnel-Tmp');
-        CF_IPS.forEach((a, i) => {
-            const name = `Cloudflare-Tunnel-Tmp-${i + 1}`;
-            proxies.push(buildClashProxy(name, tmp, a));
-            cfIpNames.push(name);
-        });
+    for (const [domain, label] of [[fixed, 'Fixed'], [tmp, 'Tmp']]) {
+        if (!domain) continue;
+        for (const protocol of rustConfig ? ['vless', 'trojan'] : ['vless']) {
+            const baseName = `Cloudflare-Tunnel-${protocol === 'trojan' ? 'Trojan-' : ''}${label}`;
+            proxies.push(buildClashProxy(baseName, domain, null, protocol));
+            domainNames.push(baseName);
+            CF_IPS.forEach((address, i) => {
+                const name = `${baseName}-${i + 1}`;
+                proxies.push(buildClashProxy(name, domain, address, protocol));
+                cfIpNames.push(name);
+            });
+        }
     }
 
     if (proxies.length === 0) return null;
@@ -249,9 +294,19 @@ rules:
 }
 
 // ===== HTTP 服务 =====
-const server = http.createServer((req, res) => {
+// noDelay: 禁用 Nagle，代理小包流量不受 40ms 合并延迟影响
+const requestHandler = (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
     // 健康检查
     if (req.url === '/') {
+        if (rustConfig) {
+            checkBackend(rustConfig, ready => {
+                if (res.destroyed) return;
+                res.writeHead(ready ? 200 : 503, { 'Content-Type': 'text/plain; charset=utf-8' });
+                res.end(ready ? 'Cloudflare Tunnel Railway Xray 网关运行中\n' : 'Railway Xray 后端尚未就绪\n');
+            });
+            return;
+        }
         res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
         res.end('🟢 Cloudflare Tunnel VLESS-WS 双隧道节点运行中\n');
         return;
@@ -259,7 +314,7 @@ const server = http.createServer((req, res) => {
 
     // 双节点 vless:// 链接
     if (req.url === `/${uuid}`) {
-        const links = getAllVlessLinks();
+        const links = getAllLinks();
         res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
         if (links.length > 0) {
             res.end(links.join('\n') + '\n');
@@ -290,17 +345,62 @@ const server = http.createServer((req, res) => {
     // 404
     res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('404 Not Found');
+};
+
+const gateway = rustConfig ? createGateway(rustConfig, { requestHandler, vlessRoot: true }) : null;
+const server = gateway ? gateway.server : http.createServer({ noDelay: true }, requestHandler);
+let backend;
+let stopping = false;
+
+async function shutdown(code) {
+    if (stopping) return;
+    stopping = true;
+    const deadline = setTimeout(() => process.exit(code), 6000);
+    try {
+        await Promise.all([
+            gateway ? gateway.close() : new Promise(resolve => {
+                for (const client of wss.clients) client.terminate();
+                server.closeAllConnections();
+                server.close(resolve);
+            }),
+            backend ? backend.stop() : Promise.resolve(),
+        ]);
+        clearTimeout(deadline);
+        process.exit(code);
+    } catch {
+        console.error('[index.js] 关闭服务失败');
+        process.exit(1);
+    }
+}
+
+process.on('SIGTERM', () => shutdown(0));
+process.on('SIGINT', () => shutdown(0));
+server.once('error', error => {
+    console.error(`[index.js] 服务异常: ${error.code || 'server error'}`);
+    shutdown(1);
 });
+if (rustConfig) {
+    backend = startBackend(rustConfig, error => {
+        console.error(`[index.js] ${error.message}`);
+        shutdown(1);
+    });
+}
 
 server.listen(PORT, () => {
     console.log(`[index.js] HTTP/WS 服务已启动，端口: ${PORT}`);
 });
 
 // ===== WebSocket VLESS 协议处理 =====
-const wss = new WSServer({ server });
+// perMessageDeflate 关闭：VLESS 帧是已加密的二进制，压缩只耗 CPU 不省带宽
+// maxPayload 收紧：VLESS 单帧无需 100MB 默认值，降低恶意大帧的内存占用
+const wss = rustConfig ? null : new WSServer({
+    server,
+    perMessageDeflate: false,
+    maxPayload: 16 * 1024 * 1024,
+});
 const uuidkey = uuid.replace(/-/g, '');
 
-wss.on('connection', ws => {
+if (wss) wss.on('connection', ws => {
     ws.once('message', msg => {
         const [VERSION] = msg;
         const id = msg.slice(1, 17);
@@ -352,18 +452,30 @@ wss.on('connection', ws => {
             udp.on('message', poke);
 
             // 客户端 -> 服务端：从 WS 流中解析 [2 字节长度][payload] 帧，逐个 udp.send 到目标
+            // 域名目标经 DNS 缓存解析一次后直发 IP；IP 目标零开销
+            const EMPTY = Buffer.alloc(0);
+            let targetIp = net.isIP(host) ? host : null;
+            const sendUdp = payload => {
+                if (targetIp) { try { udp.send(payload, port, targetIp); } catch { } return; }
+                cachedLookup(host, {}, (err, ip) => {
+                    if (err) return;
+                    targetIp = ip;
+                    try { udp.send(payload, port, ip); } catch { }
+                });
+            };
             let leftover = msg.slice(i);
             const processFrames = chunk => {
-                let buf = Buffer.concat([leftover, chunk]);
+                // 快速路径：无粘包残留时直接解析 chunk，省一次 Buffer.concat 全量拷贝
+                let buf = leftover.length ? Buffer.concat([leftover, chunk]) : chunk;
                 let off = 0;
                 while (buf.length - off >= 2) {
                     const len = buf.readUInt16BE(off);
                     if (buf.length - off < 2 + len) break; // 帧不完整，等下一截
-                    try { udp.send(buf.slice(off + 2, off + 2 + len), port, host); } catch { }
+                    sendUdp(buf.slice(off + 2, off + 2 + len));
                     poke();
                     off += 2 + len;
                 }
-                leftover = buf.slice(off);
+                leftover = off === buf.length ? EMPTY : buf.slice(off);
             };
 
             poke();
@@ -389,7 +501,13 @@ wss.on('connection', ws => {
                 if (idle) clearTimeout(idle);
                 idle = setTimeout(() => { try { ws.close(); } catch { } }, 60000);
             };
-            const closeAll = () => { for (const s of sockets.values()) { try { s.close(); } catch { } } sockets.clear(); };
+            const closeAll = () => {
+                for (const e of sockets.values()) {
+                    e.closed = true;
+                    if (e.s) { try { e.s.close(); } catch { } }
+                }
+                sockets.clear();
+            };
 
             // 解析 [port(2)][ATYP(1)][addr]，与 VLESS 地址格式一致（ATYP: 1=IPv4 2=域名 3=IPv6）
             const parseAddr = (buf, off) => {
@@ -417,21 +535,35 @@ wss.on('connection', ws => {
                 ws.send(Buffer.concat([hdr, payload]));
             };
 
+            // sockets 值为 { s, ip, addrBuf, queue, closed }：s/ip 在 DNS 解析完成后填充，
+            // 解析期间到达的帧暂存 queue；域名目标同样走 DNS 缓存
             const getSocket = (host, port, atyp, addrBuf) => {
                 const key = host + ':' + port;
-                let s = sockets.get(key);
-                if (s) return s;
-                s = dgram.createSocket(atyp === 3 ? 'udp6' : 'udp4');
-                s.on('error', () => { });
-                s.on('message', buf => { sendKeep(addrBuf, buf); poke(); });
-                sockets.set(key, s);
-                return s;
+                let e = sockets.get(key);
+                if (e) return e;
+                e = { s: null, ip: null, addrBuf, queue: [], closed: false };
+                sockets.set(key, e);
+                cachedLookup(host, {}, (err, ip) => {
+                    if (err || e.closed) { if (!e.closed) sockets.delete(key); return; }
+                    const s = dgram.createSocket(atyp === 3 ? 'udp6' : 'udp4');
+                    s.on('error', () => { });
+                    s.on('message', buf => { sendKeep(addrBuf, buf); poke(); });
+                    e.s = s;
+                    e.ip = ip;
+                    if (e.queue.length) {
+                        e.queue.forEach(p => { try { s.send(p, port, ip); } catch { } });
+                        e.queue.length = 0;
+                    }
+                });
+                return e;
             };
 
             // 流式解析 XUDP 帧（可跨 WebSocket message）
+            const EMPTY = Buffer.alloc(0);
             let leftover = msg.slice(i);
             const processFrames = chunk => {
-                let buf = Buffer.concat([leftover, chunk]);
+                // 快速路径：无粘包残留时直接解析 chunk，省一次 Buffer.concat 全量拷贝
+                let buf = leftover.length ? Buffer.concat([leftover, chunk]) : chunk;
                 let off = 0;
                 while (buf.length - off >= 2) {
                     const frameLen = buf.readUInt16BE(off);
@@ -449,15 +581,16 @@ wss.on('connection', ws => {
                         const addrBuf = buf.slice(off + 7, a.off);
                         const payload = buf.slice(off + 2 + frameLen + 2, off + 2 + frameLen + 2 + payloadLen);
                         if (a.host) {
-                            const s = getSocket(a.host, a.port, a.atyp, addrBuf);
-                            try { s.send(payload, a.port, a.host); } catch { }
+                            const e = getSocket(a.host, a.port, a.atyp, addrBuf);
+                            if (e.s) { try { e.s.send(payload, a.port, e.ip); } catch { } }
+                            else e.queue.push(payload);
                             poke();
                         }
                         frameTotal = 2 + frameLen + 2 + payloadLen;
                     }
                     off += frameTotal;
                 }
-                leftover = buf.slice(off);
+                leftover = off === buf.length ? EMPTY : buf.slice(off);
             };
 
             poke();
@@ -466,12 +599,21 @@ wss.on('connection', ws => {
             ws.on('close', () => { if (idle) clearTimeout(idle); closeAll(); });
             ws.on('error', () => { if (idle) clearTimeout(idle); closeAll(); });
         } else {
-            // ===== VLESS TCP relay（原逻辑） =====
-            const duplex = createWebSocketStream(ws);
-            net.connect({ host, port }, function () {
-                this.write(msg.slice(i));
-                duplex.on('error', () => { }).pipe(this).on('error', () => { }).pipe(duplex);
-            }).on('error', () => { });
+            // ===== VLESS TCP relay =====
+            const socket = net.connect({ host, port, lookup: cachedLookup });
+            socket.setNoDelay(true); // 禁用 Nagle，避免代理小包流量叠加 40ms 合并延迟
+            socket.on('connect', () => {
+                socket.write(msg.slice(i));
+                const duplex = createWebSocketStream(ws);
+                duplex.on('error', () => { });
+                duplex.pipe(socket).on('error', () => { }).pipe(duplex);
+            });
+            // 任一侧断开都彻底清理，防止僵尸连接累积占用内存/句柄
+            const cleanup = () => { socket.destroy(); try { ws.close(); } catch { } };
+            socket.on('error', cleanup);
+            socket.on('close', () => { try { ws.close(); } catch { } });
+            ws.on('close', () => socket.destroy());
+            ws.on('error', () => socket.destroy());
         }
     }).on('error', () => { });
 });
